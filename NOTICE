@@ -1,0 +1,14 @@
+# Ai Lubricant mobile — NOTICE
+
+本仓库是 Ai Lubricant 的移动端应用（Expo / React Native），为本项目自研代码，
+采用 Business Source License 1.1 授权（见 LICENSE）。
+
+## 第三方依赖
+
+应用通过 npm（package.json）引入第三方库，各依赖按其自身许可证（MIT / BSD /
+Apache-2.0 等）授权，随构建产物分发时保留其原始版权与许可声明。
+
+## 商标
+
+"Ai Lubricant" 为本项目的项目名。本仓库不授予任何第三方商标权；任何其它产品、
+服务或公司的名称与商标归其各自权利人所有。
