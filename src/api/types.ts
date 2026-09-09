@@ -196,6 +196,19 @@ export interface Node {
   /** 当前正在运行的会话数（用于展示占用情况）。 */
   active_sessions?: number;
   group_id?: string;
+  /** 心跳在线判定（服务端结论）；老响应缺字段时回退 connected。 */
+  online?: boolean;
+  last_heartbeat_at?: string;
+  /** 机器/客户端能力上报（os/arch/cpu/memory/editors/client_version/docker/…）。 */
+  capabilities?: Record<string, unknown>;
+  /** 安装/启动方式（对齐 admin 节点列表）。 */
+  startup_method?: string;
+  /** 运营配置的调度容量（最大会话数 / 可分配 CPU / 内存）；缺省=不限。 */
+  capacity?: { max_sessions?: number; cpu_total?: number; memory_total?: number };
+  /** 分配到该节点的未删除编辑器数。 */
+  editor_occupancy?: number;
+  /** 仅归属展示的管理节点（用户未被授权管理它，只读分组上下文）。 */
+  display_only?: boolean;
 }
 
 /** Git 平台类型（对齐后端 consts.GitPlatform）。internal 为系统内部身份，不对用户展示。 */

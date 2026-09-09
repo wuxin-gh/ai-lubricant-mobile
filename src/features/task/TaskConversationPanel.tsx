@@ -13,6 +13,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Clipboard from 'expo-clipboard';
 import { ApiError } from '@/api/client';
 import {
+  addUserTaskModels,
   cancelUserTask,
   listUserTaskEventsHistory,
   sendUserTaskMessage,
@@ -36,12 +37,13 @@ import {
   planEntriesFromRows,
   settleRunningTools,
   subagentIdOf,
+  toolKindFor,
   turnRunningFromHistory,
   type DisplayEvent,
   type SubagentRecord,
 } from '@/features/task/taskEventStream';
 import { SkillSheet } from '@/components/sheets';
-import { StreamBlock } from '@/components/StreamBlocks';
+import { StreamBlock, ToolCard } from '@/components/StreamBlocks';
 import { MicButton } from '@/components/MicButton';
 import { newClientMessageId } from '@/features/task/clientMessageId';
 import { useSpeechToText } from '@/speech/useSpeechToText';
@@ -105,10 +107,14 @@ interface TaskConversationPanelProps {
   statsTotalTokens: number;
   models: AvailableModel[];
   modelMaxTokens?: number;
+  /** 节点感知的权限模式选项（Web: nodeModeOptions(node, provider) || editorModeOptions(provider)）；
+   *  缺省时回落到按 provider 硬编码的 modeOptionsFor。 */
+  modeOptions?: { value: string; label: string }[];
   onResult: () => void;
   onSwitchModel: (modelId: string) => Promise<void>;
   onSwitchMode: (mode: string) => Promise<void>;
   onSwitchReasoningEffort: (effort: '' | 'low' | 'medium' | 'high' | 'xhigh') => Promise<void>;
+  onToast?: (msg: string) => void;
 }
 
 export function TaskConversationPanel({
@@ -116,10 +122,12 @@ export function TaskConversationPanel({
   statsTotalTokens,
   models,
   modelMaxTokens,
+  modeOptions,
   onResult,
   onSwitchModel,
   onSwitchMode,
   onSwitchReasoningEffort,
+  onToast,
 }: TaskConversationPanelProps) {
   const t = useTheme();
   const [events, setEvents] = useState<DisplayEvent[]>([]);
@@ -141,7 +149,13 @@ export function TaskConversationPanel({
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [modePickerOpen, setModePickerOpen] = useState(false);
   const [effortPickerOpen, setEffortPickerOpen] = useState(false);
+  const [addModelsOpen, setAddModelsOpen] = useState(false);
+  const [addSelection, setAddSelection] = useState<string[]>([]);
+  const [addingModels, setAddingModels] = useState(false);
   const [retryingId, setRetryingId] = useState<string | null>(null);
+  // 当前打开详情页的子 Agent（对齐 Web activeSubAgentId）：点对话流里的子 Agent 卡进入，
+  // 返回时清空。null = 主对话。
+  const [activeSubAgentId, setActiveSubAgentId] = useState<string | null>(null);
   // 执行计划条目（todo_list 帧，与 Web PlanStepsBlock 同源）。空数组 = 当前无计划。
   const [plan, setPlan] = useState<{ content: string; status: string }[]>([]);
   const seenSeqs = useRef<Set<number>>(new Set());
@@ -293,6 +307,7 @@ export function TaskConversationPanel({
     setEvents([]);
     setPlan([]);
     setTurnRunning(false);
+    setActiveSubAgentId(null);
     turnStateFromLive.current = false;
     seenSeqs.current = new Set();
     (async () => {
@@ -385,7 +400,7 @@ export function TaskConversationPanel({
     };
   }, [appendEvent, canStream, task.id]);
 
-  useEffect(() => { scrollRef.current?.scrollToEnd({ animated: true }); }, [events]);
+  useEffect(() => { scrollRef.current?.scrollToEnd({ animated: true }); }, [events, activeSubAgentId]);
 
   // 运行时是否就绪可交互：与 Web 对齐——有运行时句柄且状态可收消息即放开输入，
   // 而不是只有 processing 才允许。pending + node_session_id = 就绪待首条消息。
@@ -396,6 +411,18 @@ export function TaskConversationPanel({
   // 错误去重出口：provider 回显的同文本普通气泡升级成错误卡、重复错误帧丢弃
   // （与 Web collapseErrorDuplicates 同一出口语义，历史∪实时合并后统一套用）。
   const visibleEvents = useMemo(() => collapseErrorEvents(events), [events]);
+
+  // 子 Agent 详情页：从事件流里现取当前打开的记录（卡是聚合视图，按 subagent_id
+  // 原地累积，所以详情页随 SSE/翻页实时更新）。切对话、详情页关闭时回到 null。
+  const activeSubAgent = useMemo(() => {
+    if (!activeSubAgentId) return null;
+    const event = visibleEvents.find((candidate) => candidate.id === `subagent-entry-${activeSubAgentId}`);
+    const message = event ? displayMessage(event) : null;
+    return message && message.kind === 'subagent' ? message : null;
+  }, [activeSubAgentId, visibleEvents]);
+
+  const openSubAgent = useCallback((id: string) => { setActiveSubAgentId(id); }, []);
+  const closeSubAgent = useCallback(() => { setActiveSubAgentId(null); }, []);
 
   const submit = async () => {
     const text = message.trim();
@@ -525,8 +552,43 @@ export function TaskConversationPanel({
   }, [onResult, task.id]);
 
   // 活跃模型 = models_snapshot 头部；model_id 是 ProjectTask 绑定 UUID，非模型名。
-  const currentModel = task.models?.[0] || '默认模型';
-  const modeOpts = useMemo(() => modeOptionsFor(task.provider), [task.provider]);
+  const currentModel = task.models?.[0] || '不限制';
+  // 快照非空时只在任务已添加集合内切换；快照为空 = 不限制，下拉展示父 Key
+  // 当前允许的完整模型目录（与 Web modelOptions 同源）。从空快照首次选择即建立集合。
+  const modelOptions = useMemo(() => {
+    const labelOf = (id: string) => {
+      const meta = models.find((m) => m.id === id);
+      return meta?.name || meta?.remark || id;
+    };
+    return task.models?.length
+      ? task.models.map((id) => ({ value: id, label: labelOf(id) }))
+      : models.map((m) => ({ value: m.id, label: m.name || m.remark || m.id }));
+  }, [models, task.models]);
+  // 已添加集合之外、父 Key 允许的模型 = 可添加项（与 Web addableModelOptions 同源）。
+  const addableModels = useMemo(() => {
+    const added = new Set(task.models || []);
+    return models.filter((m) => !added.has(m.id));
+  }, [models, task.models]);
+
+  const submitAddModels = useCallback(async () => {
+    if (!addSelection.length || addingModels) return;
+    setAddingModels(true);
+    try {
+      await addUserTaskModels(task.id, addSelection);
+      setAddSelection([]);
+      setAddModelsOpen(false);
+      setModelPickerOpen(false);
+      onResult();
+      onToast?.('模型已添加');
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : '添加模型失败');
+    } finally {
+      setAddingModels(false);
+    }
+  }, [addSelection, addingModels, onResult, onToast, task.id]);
+
+  // 节点上报的权限方式优先（Web: nodeModeOptions(node, provider) || editorModeOptions）。
+  const modeOpts = useMemo(() => modeOptions ?? modeOptionsFor(task.provider), [modeOptions, task.provider]);
   const currentMode = task.mode_label || task.mode || '默认模式';
   const currentEffort = task.reasoning_effort || '';
 
@@ -549,6 +611,11 @@ export function TaskConversationPanel({
           </Pressable>
         </View>
       ) : null}
+      {/* 子 Agent 详情对话页：替换整个消息流区（输入器保留，对齐 Web 的布局语义），
+          返回键回到主对话。 */}
+      {activeSubAgent ? (
+        <SubagentDetailView message={activeSubAgent} onBack={closeSubAgent} t={t} />
+      ) : (
       <ScrollView ref={scrollRef} contentContainerStyle={{ paddingHorizontal: spacing.pad, paddingTop: 12, paddingBottom: 12, gap: 9 }}>
         {nextBefore ? (
           <Pressable onPress={() => void loadOlder()} disabled={loadingOlder} style={{ alignSelf: 'center', paddingHorizontal: 14, paddingVertical: 6, borderRadius: 12, backgroundColor: t.bg3, opacity: loadingOlder ? 0.6 : 1 }}>
@@ -576,6 +643,7 @@ export function TaskConversationPanel({
               onCopy={copyAll}
               onRetry={retryForError}
               retryBusy={retryingId === eventLogicalId(event)}
+              onOpenSubagent={openSubAgent}
             />
           );
         })}
@@ -591,6 +659,7 @@ export function TaskConversationPanel({
           </View>
         ) : null}
       </ScrollView>
+      )}
 
       {/* 输入器：模型 / 模式 / 思考等级 / token / 上下文 一线到位 */}
       <View style={{ paddingTop: 6, paddingHorizontal: spacing.pad, paddingBottom: 6 }}>
@@ -669,11 +738,15 @@ export function TaskConversationPanel({
       <PickerSheet
         visible={modelPickerOpen}
         title="切换模型（下一轮生效）"
-        options={models.map((m) => ({ value: m.id, label: m.name || m.remark || m.id }))}
-        selected={currentModel}
+        options={modelOptions}
+        selected={task.models?.[0] || ''}
         t={t}
         onPick={(id) => { setModelPickerOpen(false); void onSwitchModel(id); }}
         onClose={() => setModelPickerOpen(false)}
+        footerAction={addableModels.length ? {
+          label: '添加更多模型…',
+          onPress: () => { setModelPickerOpen(false); setAddSelection([]); setAddModelsOpen(true); },
+        } : undefined}
       />
       <PickerSheet
         visible={modePickerOpen}
@@ -692,6 +765,18 @@ export function TaskConversationPanel({
         t={t}
         onPick={(v) => { setEffortPickerOpen(false); void onSwitchReasoningEffort(v as '' | 'low' | 'medium' | 'high' | 'xhigh'); }}
         onClose={() => setEffortPickerOpen(false)}
+      />
+      <MultiPickSheet
+        visible={addModelsOpen}
+        title="添加模型"
+        hint="仅显示创建任务所选 API Key 当前允许的模型；添加后可在模型菜单中切换。"
+        options={addableModels.map((m) => ({ value: m.id, label: m.name || m.remark || m.id }))}
+        selected={addSelection}
+        busy={addingModels}
+        t={t}
+        onToggle={(id) => setAddSelection((cur) => cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id])}
+        onConfirm={() => void submitAddModels()}
+        onClose={() => { if (!addingModels) setAddModelsOpen(false); }}
       />
     </View>
   );
@@ -769,8 +854,74 @@ function BlockedCard({ title, reason, t }: { title: string; reason: string; t: T
   );
 }
 
-/** 底部弹出单选 sheet（模型 / 模式 / 思考等级共用）。 */
-function PickerSheet({ visible, title, options, selected, t, onPick, onClose }: {
+/** 子 Agent 详情对话页（对齐 Web SubagentConversationPanel）：返回行 + 名字/任务 +
+ *  进行中/已完成，下面依次是累积正文、工具调用、小结；还没有输出时给空态。
+ *  内容随事件流实时更新（message 由调用方每次从 events 现取）。 */
+function SubagentDetailView({ message, onBack, t }: { message: Extract<ChatMessage, { kind: 'subagent' }>; onBack: () => void; t: Theme }) {
+  const scrollRef = useRef<ScrollView>(null);
+  useEffect(() => { scrollRef.current?.scrollToEnd({ animated: false }); }, []);
+  const running = message.status === 'running';
+  const failed = message.status === 'error';
+  const tools = message.tools || [];
+  const hasContent = !!message.text || tools.length > 0 || !!message.summary;
+  return (
+    <View style={{ flex: 1, minHeight: 0 }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: spacing.pad, paddingTop: 10, paddingBottom: 8 }}>
+        <Pressable onPress={onBack} hitSlop={6} style={({ pressed }) => [{ flexDirection: 'row', alignItems: 'center', gap: 3, paddingVertical: 4 }, pressed && { opacity: 0.7 }]}>
+          <Icons.chevron size={13} color={t.acTx} sw={2.2} style={{ transform: [{ rotate: '180deg' }] }} />
+          <Text style={{ color: t.acTx, fontSize: 12.5, fontWeight: '700' }}>返回</Text>
+        </Pressable>
+        {running ? <Spinner size={13} color={t.acTx} sw={2.2} /> : null}
+        <Text numberOfLines={1} style={{ flexShrink: 1, maxWidth: '42%', color: t.tx, fontSize: 13.5, fontWeight: '800' }}>{message.name || '子 Agent'}</Text>
+        {message.task ? <Text numberOfLines={1} style={{ flex: 1, minWidth: 0, color: t.tx3, fontSize: 11.5 }}>· {message.task}</Text> : <View style={{ flex: 1 }} />}
+        {running ? (
+          <Text style={{ color: t.acTx, fontSize: 11.5, fontWeight: '700' }}>进行中</Text>
+        ) : failed ? (
+          <Text style={{ color: t.red, fontSize: 11.5, fontWeight: '700' }}>出错</Text>
+        ) : (
+          <Text style={{ color: t.tx3, fontSize: 11.5, fontWeight: '700' }}>已完成</Text>
+        )}
+      </View>
+      <ScrollView ref={scrollRef} contentContainerStyle={{ paddingHorizontal: spacing.pad, paddingBottom: 12, gap: 8 }}>
+        {message.text ? (
+          <View style={{ backgroundColor: t.bg3, borderRadius: 11, paddingHorizontal: 12, paddingVertical: 9 }}>
+            <Text style={{ color: t.tx2, fontSize: 13, lineHeight: 19 }}>{message.text}</Text>
+          </View>
+        ) : null}
+        {tools.length ? (
+          <View style={{ gap: 6 }}>
+            {tools.map((tool, i) => (
+              <ToolCard
+                key={`${tool.name}-${i}`}
+                msg={{
+                  id: `${message.id}-tool-${i}`,
+                  kind: 'tool',
+                  title: tool.name,
+                  toolKind: toolKindFor(tool.name, 'tool_call'),
+                  status: tool.status === 'done' ? 'completed' : 'in_progress',
+                  rawInput: tool.input,
+                  rawOutput: tool.output,
+                  time: message.time,
+                }}
+                t={t}
+              />
+            ))}
+          </View>
+        ) : null}
+        {message.summary ? <Text style={{ color: t.tx3, fontSize: 12, lineHeight: 17 }}>小结：{message.summary}</Text> : null}
+        {!hasContent ? (
+          <View style={{ height: 128, alignItems: 'center', justifyContent: 'center' }}>
+            <Text style={{ color: t.tx3, fontSize: 13 }}>该子 Agent 还没有输出</Text>
+          </View>
+        ) : null}
+      </ScrollView>
+    </View>
+  );
+}
+
+/** 底部弹出单选 sheet（模型 / 模式 / 思考等级共用）。footerAction 是列表下方的
+ *  次级入口（如「添加更多模型…」，对齐 Web 模型菜单里的添加入口）。 */
+function PickerSheet({ visible, title, options, selected, t, onPick, onClose, footerAction }: {
   visible: boolean;
   title: string;
   options: { value: string; label: string }[];
@@ -778,6 +929,7 @@ function PickerSheet({ visible, title, options, selected, t, onPick, onClose }: 
   t: Theme;
   onPick: (v: string) => void;
   onClose: () => void;
+  footerAction?: { label: string; onPress: () => void };
 }) {
   const [q, setQ] = useState('');
   useEffect(() => { if (visible) setQ(''); }, [visible]);
@@ -811,6 +963,75 @@ function PickerSheet({ visible, title, options, selected, t, onPick, onClose }: 
             );
           }}
         />
+        {footerAction ? (
+          <Pressable onPress={footerAction.onPress} style={({ pressed }) => [{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, marginHorizontal: 14, marginTop: 4, paddingVertical: 11, borderRadius: 12, borderWidth: 1, borderColor: t.line }, pressed && { opacity: 0.7 }]}>
+            <Icons.plus size={14} color={t.acTx} sw={2.2} />
+            <Text style={{ color: t.acTx, fontSize: 13, fontWeight: '700' }}>{footerAction.label}</Text>
+          </Pressable>
+        ) : null}
+      </View>
+    </Modal>
+  );
+}
+
+/** 底部弹出多选 sheet（添加模型）：复选行 + 确认条，与 Web MultiSelect 弹窗同语义。 */
+function MultiPickSheet({ visible, title, hint, options, selected, busy, t, onToggle, onConfirm, onClose }: {
+  visible: boolean;
+  title: string;
+  hint?: string;
+  options: { value: string; label: string }[];
+  selected: string[];
+  busy?: boolean;
+  t: Theme;
+  onToggle: (v: string) => void;
+  onConfirm: () => void;
+  onClose: () => void;
+}) {
+  const [q, setQ] = useState('');
+  useEffect(() => { if (visible) setQ(''); }, [visible]);
+  if (!visible) return null;
+  const rows = q ? options.filter((o) => o.label.toLowerCase().includes(q.toLowerCase()) || o.value.toLowerCase().includes(q.toLowerCase())) : options;
+  return (
+    <Modal visible transparent animationType="slide" onRequestClose={onClose} statusBarTranslucent>
+      <Pressable style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.4)' }} onPress={onClose} />
+      <View style={{ position: 'absolute', left: 0, right: 0, bottom: 0, maxHeight: '78%', backgroundColor: t.bg2, borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingBottom: 20, ...t.shLift }}>
+        <View style={{ width: 38, height: 4, borderRadius: 99, backgroundColor: t.line2, alignSelf: 'center', marginTop: 10 }} />
+        <Text style={{ paddingHorizontal: 18, paddingTop: 10, paddingBottom: 4, fontSize: 15, fontWeight: '700', color: t.tx }}>{title}</Text>
+        {hint ? <Text style={{ paddingHorizontal: 18, paddingBottom: 8, color: t.tx3, fontSize: 11.5, lineHeight: 16 }}>{hint}</Text> : null}
+        <View style={{ paddingHorizontal: 14, paddingBottom: 8 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 11, height: 38, borderRadius: 12, backgroundColor: t.bg3 }}>
+            <Icons.search size={15} color={t.tx3} sw={2} />
+            <TextInput value={q} onChangeText={setQ} placeholder="搜索" placeholderTextColor={t.tx3} autoCapitalize="none" autoCorrect={false} style={{ flex: 1, color: t.tx, fontSize: 13 }} />
+          </View>
+        </View>
+        <FlatList
+          keyboardShouldPersistTaps="handled"
+          data={rows}
+          keyExtractor={(o) => o.value || '__default__'}
+          style={{ maxHeight: 320 }}
+          contentContainerStyle={{ paddingHorizontal: 10, paddingBottom: 8 }}
+          ListEmptyComponent={<Text style={{ color: t.tx3, padding: 20, textAlign: 'center' }}>该 API Key 下没有更多可添加的模型</Text>}
+          renderItem={({ item }) => {
+            const on = selected.includes(item.value);
+            return (
+              <Pressable onPress={() => onToggle(item.value)} style={({ pressed }) => [{ flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 12, paddingVertical: 11, borderRadius: 12, backgroundColor: on ? t.acGhost : 'transparent' }, pressed && { backgroundColor: t.bg3 }]}>
+                <View style={{ width: 18, height: 18, borderRadius: 6, borderWidth: 1.6, borderColor: on ? t.acTx : t.tx3, backgroundColor: on ? t.acTx : 'transparent', alignItems: 'center', justifyContent: 'center' }}>
+                  {on ? <Icons.check size={12} color={t.acInk} sw={2.6} /> : null}
+                </View>
+                <Text numberOfLines={1} style={{ flex: 1, color: on ? t.acTx : t.tx, fontSize: 13.5, fontWeight: on ? '700' : '500' }}>{item.label}</Text>
+              </Pressable>
+            );
+          }}
+        />
+        <View style={{ flexDirection: 'row', gap: 8, paddingHorizontal: 14, paddingTop: 4 }}>
+          <Pressable onPress={onClose} disabled={busy} style={({ pressed }) => [{ flex: 1, height: 42, borderRadius: 12, borderWidth: 1, borderColor: t.line, alignItems: 'center', justifyContent: 'center' }, pressed && { opacity: 0.7 }]}>
+            <Text style={{ color: t.tx2, fontSize: 13.5, fontWeight: '700' }}>取消</Text>
+          </Pressable>
+          <Pressable onPress={onConfirm} disabled={!selected.length || busy} style={({ pressed }) => [{ flex: 2, height: 42, borderRadius: 12, backgroundColor: t.ac, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 6 }, (!selected.length || busy) && { opacity: 0.4 }, pressed && { opacity: 0.85 }]}>
+            {busy ? <Spinner size={14} color={t.acInk} sw={2.2} /> : null}
+            <Text style={{ color: t.acInk, fontSize: 13.5, fontWeight: '700' }}>添加{selected.length ? `（${selected.length}）` : ''}</Text>
+          </Pressable>
+        </View>
       </View>
     </Modal>
   );

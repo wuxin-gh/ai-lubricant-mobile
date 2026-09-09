@@ -61,7 +61,14 @@ export interface TaskEventEffect {
 }
 
 /** 子 Agent 折叠记录：对话流里每个子 Agent 一张可展开卡（复用 StreamBlocks 的 SubagentBlock）。 */
-export interface SubagentTool { name: string; status: 'running' | 'done' }
+export interface SubagentTool {
+  name: string;
+  status: 'running' | 'done';
+  /** 工具入参（与根对话 ToolCard 同源：item.input ?? item.arguments ?? item）。 */
+  input?: unknown;
+  /** 工具产物（item.output ?? item.result）；非空即视作已完成。 */
+  output?: unknown;
+}
 export interface SubagentRecord {
   id: string;
   name: string;
@@ -220,18 +227,31 @@ export function foldSubagentItem(prev: SubagentRecord | undefined, item: Record<
     if (itemId) base.lastTextItemId = itemId;
   } else if (TOOL_ITEM_TYPES.has(type)) {
     const toolName = itemTitle(item);
-    const done = mapToolStatus(item.status) === 'completed';
+    // 与根对话 itemToMessage 的 ToolCard 同源：入参/产物随卡带走，详情页里能展开
+    // 看命令/路径与输出，而不是只留一个工具名。
+    const explicitInput = (item.input ?? item.arguments) as unknown;
+    const input = explicitInput ?? item;
+    const output = item.output ?? item.result;
+    const done = output != null || mapToolStatus(item.status) === 'completed';
     const tools = base.tools.slice();
     let runningIdx = -1;
     for (let i = tools.length - 1; i >= 0; i -= 1) {
       if (tools[i].name === toolName && tools[i].status === 'running') { runningIdx = i; break; }
     }
     if (done) {
-      if (runningIdx >= 0) tools[runningIdx] = { name: toolName, status: 'done' };
-      else tools.push({ name: toolName, status: 'done' });
+      const entry: SubagentTool = { name: toolName, status: 'done', output };
+      if (runningIdx >= 0) {
+        // 稀疏完成帧（只有 output 没有 input）不冲掉已存的入参。
+        tools[runningIdx] = { ...tools[runningIdx], ...entry, input: explicitInput ?? tools[runningIdx].input };
+      } else {
+        tools.push({ name: toolName, status: 'done', input, output });
+      }
     } else if (runningIdx < 0) {
-      // 新一次调用：同名的已完成条目不复活，追加一条在跑的。
-      tools.push({ name: toolName, status: 'running' });
+      // 新一次调用：同名的已完成条目不复活，追加一条在跑的（带上入参）。
+      tools.push({ name: toolName, status: 'running', input });
+    } else {
+      // 同名在跑的条目推进：入参可能分帧到达，补齐但不抢已完成状态。
+      tools[runningIdx] = { ...tools[runningIdx], input: explicitInput ?? tools[runningIdx].input };
     }
     base.tools = tools;
   } else if (type === 'error') {
@@ -241,13 +261,21 @@ export function foldSubagentItem(prev: SubagentRecord | undefined, item: Record<
   return base;
 }
 
-/** 历史与实时各自按条目累积，同一子 Agent 的两份记录可能互为子集：内容取更完整的一边，工具按名合并（done 优先）。 */
+/** 历史与实时各自按条目累积，同一子 Agent 的两份记录可能互为子集：内容取更完整的一边，工具按名合并（done 优先，入参/产物取非空的一边）。 */
 export function mergeSubagentRecord(prev: SubagentRecord, next: SubagentRecord): SubagentRecord {
   const tools: SubagentTool[] = [];
   for (const tool of [...prev.tools, ...next.tools]) {
     const idx = tools.findIndex((candidate) => candidate.name === tool.name);
     if (idx === -1) tools.push({ ...tool });
-    else if (tool.status === 'done') tools[idx] = { ...tool, status: 'done' };
+    else {
+      const current = tools[idx];
+      tools[idx] = {
+        ...current,
+        status: current.status === 'done' || tool.status === 'done' ? 'done' : current.status,
+        input: tool.input ?? current.input,
+        output: tool.output ?? current.output,
+      };
+    }
   }
   const nextFresher = next.content.length >= prev.content.length;
   return {

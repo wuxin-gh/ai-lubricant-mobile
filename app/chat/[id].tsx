@@ -477,6 +477,7 @@ export default function ChatConversationScreen() {
         onBack={() => router.back()}
         right={
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
+            <Pressable onPress={() => router.push('/chat/new' as never)} hitSlop={8} style={{ padding: 8 }}><Icons.plus size={21} color={t.acTx} sw={2.2} /></Pressable>
             <Pressable onPress={() => setContextOpen(true)} hitSlop={8} style={{ padding: 8 }}><Icons.settings size={19} color={t.tx2} sw={2} /></Pressable>
             {busy ? (
               <Pressable onPress={conv.abort} hitSlop={6} style={{ padding: 8, flexDirection: 'row', alignItems: 'center', gap: 4 }}>

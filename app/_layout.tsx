@@ -1,12 +1,15 @@
 import { Stack, useRouter, useSegments } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import React, { useEffect } from 'react';
+import { Platform } from 'react-native';
 import { KeyboardProvider } from 'react-native-keyboard-controller';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
+import * as Notifications from 'expo-notifications';
 import { AuthProvider, useAuth } from '@/auth/AuthContext';
 import { resolveRootDestination } from '@/auth/routeGuard';
 import { LoadingView } from '@/components/ui';
 import { PreviewProvider } from '@/components/PreviewProvider';
+import { configurePushPresentation, routeFromNotification } from '@/notifications/push';
 import { ThemeProvider, useTheme } from '@/theme';
 
 function RootNav() {
@@ -31,6 +34,25 @@ function RootNav() {
     if (segments[0] === 'login' && router.canDismiss?.()) router.dismissAll();
     router.replace(destination as never);
   }, [ready, authenticated, isAdmin, mode, needsPortalChoice, segments, router]);
+
+  // 推送：前台展示策略 + 点击（含冷启动 last response）统一走 routeFromNotification。
+  // web 平台没有 expo-notifications 原生实现（getLastNotificationResponseAsync 等会抛
+  // "not available on web"），整段跳过；推送本就只面向 iOS/Android。
+  useEffect(() => {
+    if (Platform.OS === 'web') return;
+    configurePushPresentation();
+    const sub = Notifications.addNotificationResponseReceivedListener((response: Notifications.NotificationResponse) => {
+      const route = routeFromNotification(response.notification.request.content.data as Record<string, unknown> | null);
+      if (route) router.push(route as never);
+    });
+    // 冷启动：app 由点开通知启动时，上一次的 response 在监听注册前已派发，取回补处理。
+    void Notifications.getLastNotificationResponseAsync().then((response: Notifications.NotificationResponse | null) => {
+      if (!response) return;
+      const route = routeFromNotification(response.notification.request.content.data as Record<string, unknown> | null);
+      if (route && ready && authenticated) router.push(route as never);
+    });
+    return () => sub.remove();
+  }, [ready, authenticated, router]);
 
   if (!ready) return <LoadingView label="正在加载…" />;
 
@@ -69,6 +91,25 @@ function RootNav() {
       <Stack.Screen name="chat/index" />
       <Stack.Screen name="chat/new" />
       <Stack.Screen name="chat/[id]" />
+      {/* 通知中心 / 设置（设备、事件规则、历史）。push 屏：用 GlassNav。 */}
+      <Stack.Screen name="notifications/index" />
+      {/* 用户侧资源三入口：资源中心（MCP/Skill/插件/提示词/市场）、我的工具（浏览器/邮箱/设备）、节点。 */}
+      <Stack.Screen name="mcp/index" />
+      <Stack.Screen name="mcp/principals" />
+      <Stack.Screen name="mcp/import" />
+      <Stack.Screen name="mcp/service/[id]" />
+      <Stack.Screen name="mcp/prompt/[id]" />
+      <Stack.Screen name="mcp/market/[module]/[id]" />
+      <Stack.Screen name="resources/index" />
+      <Stack.Screen name="resources/cdp/[id]" />
+      <Stack.Screen name="resources/cdp/new" />
+      <Stack.Screen name="resources/mail/[id]" />
+      <Stack.Screen name="resources/mail/new" />
+      <Stack.Screen name="resources/mail/[id]/query" />
+      <Stack.Screen name="resources/device/[id]" />
+      <Stack.Screen name="resources/device/new" />
+      <Stack.Screen name="nodes/index" />
+      <Stack.Screen name="nodes/[id]" />
       {/* 编辑器路由仅作为已发布 App/deep link 的兼容重定向保留；产品入口已下线。 */}
       <Stack.Screen name="editor/index" />
       <Stack.Screen name="editor/[id]" />

@@ -3,18 +3,21 @@
  *
  * 只保留最基本的三项：服务器域名、账号、密码。移除了 Apple / 手机号 / 抖音 /
  * GitHub 等第三方登录、协议勾选与隐藏的服务器设置入口——私有化部署只需要
- * 「填域名 + 账号密码」即可登录。
+ * 「填域名 + 账号密码」即可登录。服务器地址支持局域网 UDP 广播扫描自动发现
+ * （mobile/src/native/lanDiscover.ts）。
  */
 import { StatusBar } from 'expo-status-bar';
 import { useRouter } from 'expo-router';
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { ActivityIndicator, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Circle, Defs, LinearGradient as SvgLinearGradient, Rect, Stop } from 'react-native-svg';
 import { ApiError, DEFAULT_BASE_URL } from '@/api/client';
+import { prefetchCaptcha } from '@/api/captcha';
 import { useAuth } from '@/auth/AuthContext';
 import { Icons } from '@/components/Icons';
 import { MonkeyLogo } from '@/components/ui';
+import { discoverLanServers, type LanServer } from '@/native/lanDiscover';
 import { useTheme } from '@/theme';
 
 const norm = (u: string) => u.trim().replace(/\/+$/, '');
@@ -35,12 +38,20 @@ export default function LoginScreen() {
   const [phase, setPhase] = useState('');
   const [error, setError] = useState('');
   const [focused, setFocused] = useState<string | null>(null);
+  // 局域网扫描：状态 + 结果弹层（mobile/src/native/lanDiscover.ts）
+  const [scanning, setScanning] = useState(false);
+  const [scanResults, setScanResults] = useState<LanServer[] | null>(null);
   // 管理员登录后选门户：由 AuthContext.needsPortalChoice 驱动，选中后 setMode() 同时清掉该标记。
 
   const pickMode = (m: 'user' | 'admin') => {
     setMode(m);
     router.replace((m === 'admin' ? '/management' : '/(tabs)/tasks') as never);
   };
+
+  // 挂载即预取验证码：用户填账号密码期间后台拉挑战 + 算完 PoW（约 20 万次哈希），
+  // 点登录时直接复用——把验证码两步请求和计算成本藏进输入时间，登录按钮不再卡几秒。
+  // 目标地址变也重新预取（挑战按一次性消费，且不同后端实例的挑战不可共用）。
+  useEffect(() => { prefetchCaptcha(norm(server)); }, [server]);
 
   // 视觉常量（与原设计一致，仅精简结构）
   const pageBg = '#F6F7F3';
@@ -90,6 +101,45 @@ export default function LoginScreen() {
     }
   };
 
+  // 局域网扫描：UDP 广播 + 收应答（详见 lan_discovery.py / docs/lan-discovery.md）。
+  // iOS 首次扫描触发本地网络权限弹窗，本次调用往往已超时 → 零结果时自动补扫一次；
+  // 仍为零再提示「去 设置 > 本地网络 开启」。
+  const onScan = async (isRetry = false) => {
+    if (scanning || busy) return;
+    setError('');
+    setScanning(true);
+    try {
+      const servers = await discoverLanServers();
+      if (servers.length === 0 && !isRetry && Platform.OS === 'ios') {
+        setScanning(false);
+        await onScan(true); // 首次大概率在等权限弹窗，自动补扫一轮
+        return;
+      }
+      if (servers.length === 0) {
+        setError(
+          Platform.OS === 'ios'
+            ? '未发现局域网服务器，请确认手机与服务器在同一 Wi-Fi；若已拒绝本地网络权限，请到 设置 > 隐私与安全 > 本地网络 开启后重试'
+            : '未发现局域网服务器，请确认手机与服务器在同一 Wi-Fi，或手动输入地址',
+        );
+        return;
+      }
+      if (servers.length === 1) {
+        setServer(servers[0].url);
+      } else {
+        setScanResults(servers); // 多台弹列表让用户挑
+      }
+    } catch (e) {
+      setError((e as Error)?.message || '局域网扫描失败');
+    } finally {
+      setScanning(false);
+    }
+  };
+
+  const pickServer = (s: LanServer) => {
+    setServer(s.url);
+    setScanResults(null);
+  };
+
   const HeroBackground = (
     <View style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 336, borderBottomLeftRadius: 44, borderBottomRightRadius: 44, overflow: 'hidden' }}>
       <Svg width="100%" height="100%" viewBox="0 0 390 336" preserveAspectRatio="none">
@@ -133,6 +183,11 @@ export default function LoginScreen() {
             <TextInput value={server} onChangeText={setServer} placeholder="https://your-domain.com" placeholderTextColor="#B4B9B0"
               autoCapitalize="none" autoCorrect={false} keyboardType="url" editable={!busy}
               style={inputStyle} {...focusProps('server')} />
+            <Pressable onPress={() => onScan()} disabled={scanning || busy} hitSlop={8} style={{ padding: 8 }}>
+              {scanning
+                ? <ActivityIndicator color={heroGreen} size="small" />
+                : <Icons.radar size={20} color={focused === 'server' ? heroGreen : iconIdle} sw={1.9} />}
+            </Pressable>
           </View>
 
           <View style={fieldFrameStyle('email')}>
@@ -193,6 +248,40 @@ export default function LoginScreen() {
                 <Text style={styles.modeChoiceSub}>平台配置、成员、渠道与日志</Text>
               </View>
               <Icons.chevron size={17} color={heroGreen2} sw={2} />
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+
+      {/* 局域网扫描发现多台服务器时选择 */}
+      <Modal visible={scanResults !== null} transparent animationType="fade" onRequestClose={() => setScanResults(null)}>
+        <View style={styles.modeBackdrop}>
+          <View style={[styles.modeCard, { backgroundColor: sheetBg }]}>
+            <View style={styles.modeIcon}>
+              <Icons.radar size={25} color={heroGreen2} sw={2} />
+            </View>
+            <Text style={styles.modeTitle}>发现 {scanResults?.length || 0} 台服务器</Text>
+            <Text style={styles.modeSubtitle}>请选择要登录的服务器。</Text>
+            {(scanResults || []).map((s) => (
+              <Pressable
+                key={s.url}
+                onPress={() => pickServer(s)}
+                style={({ pressed }) => [styles.modeChoice, { borderColor: fieldBorder, backgroundColor: fieldBg }, pressed && { opacity: 0.72 }]}
+              >
+                <Icons.server size={21} color={inputText} sw={1.9} />
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.modeChoiceTitle} numberOfLines={1}>{s.name}</Text>
+                  <Text style={styles.modeChoiceSub} numberOfLines={1}>{s.ip}{s.version ? ` · v${s.version}` : ''}</Text>
+                </View>
+                <Icons.chevron size={17} color={iconIdle} sw={2} />
+              </Pressable>
+            ))}
+            <Pressable onPress={() => setScanResults(null)} style={({ pressed }) => [styles.modeChoice, { borderColor: fieldBorder }, pressed && { opacity: 0.72 }]}>
+              <Icons.x size={21} color={iconIdle} sw={2} />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.modeChoiceTitle}>取消</Text>
+                <Text style={styles.modeChoiceSub}>保持当前填写的服务器地址</Text>
+              </View>
             </Pressable>
           </View>
         </View>

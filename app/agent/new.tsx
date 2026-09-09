@@ -55,13 +55,11 @@ export default function NewAgentConversationScreen() {
   return (
     <View style={{ flex: 1, backgroundColor: t.bg }}>
       <ScrollView contentContainerStyle={{ paddingTop: spacing.pad + 56, paddingHorizontal: spacing.pad, paddingBottom: 40, gap: 16 }}>
-        <Text style={{ color: t.tx, fontSize: 22, fontWeight: '800' }}>新 Agent 对话</Text>
-        <Text style={{ color: t.tx3, fontSize: 13, marginTop: -8 }}>选择一个 Agent 并起个标题（可选）</Text>
-
         <LabeledInput label="对话标题" value={title} onChangeText={setTitle} placeholder="可选，留空自动命名" />
 
         {loading ? <LoadingView label="加载 Agent…" /> : (
           <View style={{ gap: 8 }}>
+            <Text style={{ fontSize: 12, fontWeight: '700', color: t.tx3, letterSpacing: 0.3 }}>选择 Agent</Text>
             {agents.map((a) => {
               const on = picked?.id === a.id;
               return (

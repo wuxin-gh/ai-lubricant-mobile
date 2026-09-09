@@ -98,8 +98,8 @@ export type ChatMessage =
       /** 流式累积的正文。 */
       text?: string;
       summary?: string;
-      /** 工具调用：name → 最近状态（运行中/已完成）。 */
-      tools?: { name: string; status?: string }[];
+      /** 工具调用：name → 最近状态（运行中/已完成），带原始入参与产物供详情页展开。 */
+      tools?: { name: string; status?: string; input?: unknown; output?: unknown }[];
       time?: number;
     };
 

@@ -288,6 +288,28 @@ export async function switchUserTaskModel(taskId: string, modelId: string) {
   return response.data;
 }
 
+/** 把模型追加进任务的已添加集合（按创建时父 API Key 的允许目录校验）。 */
+export async function addUserTaskModels(taskId: string, models: string[]) {
+  const response = await request<{ task_id: string; models: string[] }>(`${taskPath(taskId)}/models`, { method: 'POST', body: { models } });
+  return response.data;
+}
+
+export interface UserTaskPort {
+  port?: number;
+  status?: string;
+  preview_url?: string;
+  error_message?: string;
+}
+
+/**
+ * 任务工作区端口预览。后端目前对任务返回 ``{ports: [], supported: true}``
+ * （节点侧任务端口发现还没落地），所以 UI 走正常的「无端口」空态，而不是伪造数据。
+ */
+export async function listUserTaskPorts(taskId: string): Promise<{ ports: UserTaskPort[]; supported: boolean }> {
+  const response = await request<{ ports?: UserTaskPort[]; supported?: boolean }>(`${taskPath(taskId)}/ports`);
+  return { ports: response.data?.ports ?? [], supported: response.data?.supported ?? true };
+}
+
 export interface UserTaskEventRow {
   seq: number;
   kind: string;

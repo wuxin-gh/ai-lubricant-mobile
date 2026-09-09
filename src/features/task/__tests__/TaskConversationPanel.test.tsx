@@ -10,6 +10,7 @@ import TestRenderer, { act } from 'react-test-renderer';
 
 const mockListHistory = jest.fn(async () => ({ rows: [], next_before: null }));
 const mockSendTaskMessage = jest.fn(async () => ({ accepted: true }));
+const mockAddModels = jest.fn(async () => ({ models: [] }));
 let mockEventSink: ((event: Record<string, unknown>) => void) | null = null;
 
 jest.mock('react-native', () => {
@@ -60,16 +61,37 @@ jest.mock('@/components/Icons', () => {
 
 jest.mock('@/components/StreamBlocks', () => {
   const ReactImpl = require('react') as typeof React;
-  return {
-    StreamBlock: ({ message, onRetry, retryBusy }: { message: { kind: string; text?: string; title?: string }; onRetry?: () => void; retryBusy?: boolean }) => ReactImpl.createElement(
+  const StreamBlock = ({ message, onRetry, retryBusy, onOpenSubagent }: { message: { kind: string; text?: string; title?: string; name?: string; task?: string; subagentId?: string }; onRetry?: () => void; retryBusy?: boolean; onOpenSubagent?: (id: string) => void }) => ReactImpl.createElement(
+    'View',
+    null,
+    // 子 Agent 入口卡：渲染名字 + 任务，点击触发 onOpenSubagent。
+    message.kind === 'subagent'
+      ? ReactImpl.createElement('Pressable', { onPress: () => onOpenSubagent?.(message.subagentId || '') }, ReactImpl.createElement('Text', null, message.name || '子 Agent'), ReactImpl.createElement('Text', null, message.task || ''))
+      : ReactImpl.createElement('Text', null, message.text || message.title || message.kind),
+    onRetry
+      ? ReactImpl.createElement('Pressable', { onPress: onRetry }, ReactImpl.createElement('Text', null, retryBusy ? '重试中…' : '重试这一条'))
+      : null,
+  );
+  // ToolCard 最小替身：收起显示标题+目标，有产物时可展开看输出（与真组件同一交互语义）。
+  const ToolCard = ({ msg }: { msg: { title?: string; rawInput?: unknown; rawOutput?: unknown; status?: string; toolKind?: string } }) => {
+    const [open, setOpen] = ReactImpl.useState(false);
+    const ri = (msg.rawInput && typeof msg.rawInput === 'object' ? msg.rawInput : {}) as Record<string, unknown>;
+    const target = String(ri.command ?? ri.file_path ?? ri.path ?? ri.pattern ?? ri.url ?? ri.query ?? '');
+    const out = typeof msg.rawOutput === 'string' ? msg.rawOutput
+      : msg.rawOutput && typeof msg.rawOutput === 'object' ? String((msg.rawOutput as Record<string, unknown>).output ?? '') : '';
+    return ReactImpl.createElement(
       'View',
       null,
-      ReactImpl.createElement('Text', null, message.text || message.title || message.kind),
-      onRetry
-        ? ReactImpl.createElement('Pressable', { onPress: onRetry }, ReactImpl.createElement('Text', null, retryBusy ? '重试中…' : '重试这一条'))
-        : null,
-    ),
+      ReactImpl.createElement(
+        'Pressable',
+        { onPress: () => { if (out) setOpen((v: boolean) => !v); } },
+        ReactImpl.createElement('Text', null, msg.title || ''),
+        target ? ReactImpl.createElement('Text', null, target) : null,
+      ),
+      open ? ReactImpl.createElement('Text', null, out) : null,
+    );
   };
+  return { StreamBlock, ToolCard };
 });
 
 jest.mock('@/components/ui', () => {
@@ -95,6 +117,7 @@ jest.mock('@/components/MicButton', () => {
 });
 
 jest.mock('@/api/task', () => ({
+  addUserTaskModels: (...args: unknown[]) => mockAddModels(...args),
   cancelUserTask: jest.fn(async () => ({ accepted: true })),
   listUserTaskEventsHistory: (...args: unknown[]) => mockListHistory(...args),
   sendUserTaskMessage: (...args: unknown[]) => mockSendTaskMessage(...args),
@@ -437,4 +460,134 @@ it('retry without a preceding user input does not invoke a separate restart', as
   // is sent. With no prior user message there is nothing valid to retry.
   expect(mockSendTaskMessage).not.toHaveBeenCalled();
   expect(JSON.stringify(renderer!.toJSON())).toContain('找不到可重试的上一轮消息');
+});
+
+it('restricts the model picker to the task snapshot and offers add-more', async () => {
+  // 快照非空 = 只能在已添加集合内切换；快照外的模型走「添加更多模型」（与 Web modelOptions 同源）。
+  const renderer = renderPanel({ models: ['gpt-x'] });
+  await act(async () => { pressableWithText(renderer, 'gpt-x')!.props.onPress(); });
+  const openModal = renderer.root.findAll((node) => node.type === 'Modal' && node.props.visible === true)[0];
+  const texts = openModal.findAll((node) => node.type === 'Text').map((node) => node.children.join('')).join('|');
+  expect(texts).toContain('GPT X');
+  expect(texts).not.toContain('GPT Y'); // 快照外模型不进切换列表
+  expect(texts).toContain('添加更多模型');
+});
+
+it('adds models from the add-more sheet and refreshes', async () => {
+  const onResult = jest.fn();
+  const onToast = jest.fn();
+  let renderer: TestRenderer.ReactTestRenderer | undefined;
+  act(() => {
+    renderer = TestRenderer.create(
+      <TaskConversationPanel
+        task={baseTask({ models: ['gpt-x'] })}
+        statsTotalTokens={0}
+        models={[{ id: 'gpt-x', name: 'GPT X' }, { id: 'gpt-y', name: 'GPT Y' }]}
+        onResult={onResult}
+        onSwitchModel={mockNoopAsync}
+        onSwitchMode={mockNoopAsync}
+        onSwitchReasoningEffort={mockNoopAsync}
+        onToast={onToast}
+      />,
+    );
+  });
+  await act(async () => { pressableWithText(renderer!, 'gpt-x')!.props.onPress(); });
+  await act(async () => { pressableWithText(renderer!, '添加更多模型')!.props.onPress(); });
+  await act(async () => { pressableWithText(renderer!, 'GPT Y')!.props.onPress(); });
+  await act(async () => { pressableWithText(renderer!, '添加（1）')!.props.onPress(); });
+  expect(mockAddModels).toHaveBeenCalledWith('task-1', ['gpt-y']);
+  expect(onResult).toHaveBeenCalled();
+  expect(onToast).toHaveBeenCalledWith('模型已添加');
+});
+
+it('tapping a subagent card opens its detail page and back returns to the conversation', async () => {
+  // 子 Agent 条目按 id 折成一张入口卡；点卡进入详情页（返回 / 名字 / 任务 / 状态 +
+  // 正文 / 工具 / 小结），返回键回到主对话（对齐 Web SubagentConversationPanel）。
+  mockListHistory.mockResolvedValue({
+    rows: [
+      { seq: 1, kind: 'item', event_type: 'user_input', payload: { item: { id: 'u1', type: 'user_input', text: '调研一下' } } },
+      { seq: 2, kind: 'item', event_type: 'agent_message', payload: { item: { id: 'sa1', type: 'agent_message', text: '子代理开始工作', subagent_id: 'sub-a', agent_name: 'Researcher', task: '收集资料' } } },
+    ],
+    next_before: null,
+  });
+  const renderer = renderPanel();
+  for (let i = 0; i < 5; i++) await act(async () => { await Promise.resolve(); });
+
+  // 入口卡在主对话里；详情页未打开。
+  let json = JSON.stringify(renderer.toJSON());
+  expect(json).toContain('Researcher');
+  expect(json).toContain('收集资料');
+  expect(json).not.toContain('返回');
+
+  // 点卡进入详情页。
+  const card = pressableWithText(renderer, 'Researcher');
+  expect(card).toBeTruthy();
+  await act(async () => { card!.props.onPress(); });
+  json = JSON.stringify(renderer.toJSON());
+  expect(json).toContain('返回');
+  expect(json).toContain('子代理开始工作');
+  // 详情页打开时主对话的内容不再渲染（正文留在详情页）。
+  expect(json).not.toContain('调研一下');
+
+  // 返回键回到主对话。
+  const back = pressableWithText(renderer, '返回');
+  expect(back).toBeTruthy();
+  await act(async () => { back!.props.onPress(); });
+  json = JSON.stringify(renderer.toJSON());
+  expect(json).toContain('调研一下');
+  expect(json).not.toContain('返回');
+});
+
+it('keeps an open subagent detail page live-updating from SSE frames', async () => {
+  // 详情页打开期间 SSE 继续推进子 Agent 记录（原地累积），详情页内容跟着长出来。
+  mockListHistory.mockResolvedValue({
+    rows: [
+      { seq: 2, kind: 'item', event_type: 'agent_message', payload: { item: { id: 'sb1', type: 'agent_message', text: '第一段', subagent_id: 'sub-b', agent_name: 'Coder', task: '写代码' } } },
+    ],
+    next_before: null,
+  });
+  const renderer = renderPanel();
+  for (let i = 0; i < 5; i++) await act(async () => { await Promise.resolve(); });
+  await act(async () => { pressableWithText(renderer, 'Coder')!.props.onPress(); });
+  expect(JSON.stringify(renderer.toJSON())).toContain('第一段');
+
+  await act(async () => {
+    mockEventSink?.({
+      kind: 'agent_event',
+      event_type: 'agent_event',
+      item_type: 'agent_message',
+      payload: { event: { item: { id: 'sb2', type: 'agent_message', text: '第二段', subagent_id: 'sub-b' } } },
+    });
+  });
+  const json = JSON.stringify(renderer.toJSON());
+  expect(json).toContain('第一段');
+  expect(json).toContain('第二段');
+});
+
+it('shows subagent tool inputs and outputs in the detail page', async () => {
+  // 子 Agent 的工具调用要能看到目标与产物：详情页复用 ToolCard —— 收起显示
+  // 动作+目标（命令/路径），展开看输出，而不是只列一个工具名。
+  mockListHistory.mockResolvedValue({
+    rows: [
+      { seq: 1, kind: 'item', event_type: 'agent_message', payload: { item: { id: 'sc1', type: 'agent_message', text: '开始分析', subagent_id: 'sub-c', agent_name: 'Analyzer', task: '跑分析' } } },
+      { seq: 2, kind: 'item', event_type: 'tool_call', payload: { item: { id: 'sc2', type: 'tool_call', title: 'Bash', subagent_id: 'sub-c', status: 'completed', input: { command: 'ls -la' }, output: 'file-a.txt\nfile-b.txt' } } },
+    ],
+    next_before: null,
+  });
+  const renderer = renderPanel();
+  for (let i = 0; i < 5; i++) await act(async () => { await Promise.resolve(); });
+  await act(async () => { pressableWithText(renderer, 'Analyzer')!.props.onPress(); });
+
+  // 收起的工具卡已经带目标行（入参里的 command）。
+  let json = JSON.stringify(renderer.toJSON());
+  expect(json).toContain('ls -la');
+  expect(json).not.toContain('file-a.txt');
+
+  // 展开工具卡看到输出（命令产物）。
+  const card = pressableWithText(renderer, 'Bash');
+  expect(card).toBeTruthy();
+  await act(async () => { card!.props.onPress(); });
+  json = JSON.stringify(renderer.toJSON());
+  expect(json).toContain('file-a.txt');
+  expect(json).toContain('file-b.txt');
 });

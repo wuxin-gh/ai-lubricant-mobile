@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, AppState, Image, Linking, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { resolveAssetUrl } from '@/api/client';
+import { fetchUnreadCount } from '@/api/notifications';
 import { checkAppUpdate, downloadAndInstallApk, installedAppVersion, latestAndroidPackage } from '@/updates/appUpdate';
 import { useAuth } from '@/auth/AuthContext';
 import { Icons } from '@/components/Icons';
@@ -199,11 +200,14 @@ export default function ProfileScreen() {
   const [toast, setToast] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState(false);
   const [avatarBroken, setAvatarBroken] = useState(false);
+  const [unreadCount, setUnreadCount] = useState<number | null>(null);
 
   useFocusEffect(
     useCallback(() => {
       let active = true;
       refreshUser().catch(() => undefined).finally(() => { if (active) setBusy(false); });
+      // 通知未读数：进页面刷新一次（通知中心打开/已读后回来也会刷新）。
+      fetchUnreadCount().then((n) => { if (active) setUnreadCount(n); }).catch(() => undefined);
       return () => { active = false; };
     }, [refreshUser]),
   );
@@ -272,11 +276,14 @@ export default function ProfileScreen() {
             </View>
           </Card>
 
-          {/* 代码仓库与模型管理入口 */}
+          {/* 工具与资源入口：我的工具（浏览器/邮箱/设备）、资源中心（MCP/Skill/插件/提示词/市场）、执行节点 */}
           <Card style={{ paddingTop: 14, paddingBottom: 2 }}>
             <Text style={{ fontSize: 12, fontWeight: '700', color: t.tx3, letterSpacing: 0.5, paddingHorizontal: 16, marginBottom: 2 }}>集成</Text>
-            <Row icon="git" label="Git 账号" value="绑定代码仓库凭证" onPress={() => router.push('/git-identities')} />
-            <Row icon="cube" label="工具与配置" value="内置工具与个人 MCP 服务" divider onPress={() => router.push('/resources' as never)} />
+            <Row icon="bell" label="通知" value={unreadCount ? `${unreadCount} 条未读` : '手机推送与通知记录'} onPress={() => router.push('/notifications' as never)} />
+            <Row icon="git" label="Git 账号" value="绑定代码仓库凭证" divider onPress={() => router.push('/git-identities')} />
+            <Row icon="cube" label="我的工具" value="浏览器、邮箱与设备控制" divider onPress={() => router.push('/resources' as never)} />
+            <Row icon="sparkle" label="资源中心" value="MCP、Skill、插件与提示词" divider onPress={() => router.push('/mcp' as never)} />
+            <Row icon="terminal" label="节点" value="执行节点状态与详情" divider onPress={() => router.push('/nodes' as never)} />
           </Card>
 
           {/* 外观：主题 + 点缀色 */}

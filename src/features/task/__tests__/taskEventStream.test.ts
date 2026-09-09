@@ -94,14 +94,18 @@ describe('taskEventStream', () => {
 
   it('tracks sub-agent tool calls by name with running → done progression', () => {
     let record: SubagentRecord = foldSubagentItem(undefined, { id: 't1', type: 'tool_call', title: 'Read', input: { file_path: 'a.ts' }, status: 'running' }, 'call_child');
-    expect(record.tools).toEqual([{ name: 'Read', status: 'running' }]);
+    expect(record.tools).toEqual([{ name: 'Read', status: 'running', input: { file_path: 'a.ts' } }]);
 
+    // 稀疏完成帧只带 output：入参不被整帧冲掉（ToolCard 还要靠它显示目标）。
     record = foldSubagentItem(record, { id: 't1', type: 'tool_call', title: 'Read', output: 'ok', status: 'done' }, 'call_child');
-    expect(record.tools).toEqual([{ name: 'Read', status: 'done' }]);
+    expect(record.tools).toEqual([{ name: 'Read', status: 'done', input: { file_path: 'a.ts' }, output: 'ok' }]);
 
     // 同名工具的再一次调用：追加一条在跑的，不复活已完成条目。
     record = foldSubagentItem(record, { id: 't2', type: 'tool_call', title: 'Read', input: { file_path: 'b.ts' }, status: 'running' }, 'call_child');
-    expect(record.tools).toEqual([{ name: 'Read', status: 'done' }, { name: 'Read', status: 'running' }]);
+    expect(record.tools).toEqual([
+      { name: 'Read', status: 'done', input: { file_path: 'a.ts' }, output: 'ok' },
+      { name: 'Read', status: 'running', input: { file_path: 'b.ts' } },
+    ]);
   });
 
   it('settles running sub-agents and their tools when the turn completes', () => {
@@ -117,7 +121,7 @@ describe('taskEventStream', () => {
     const settled = settleRunningTools([entry]);
     const sub = (settled[0].payload?.subagent ?? {}) as SubagentRecord;
     expect(sub.status).toBe('done');
-    expect(sub.tools).toEqual([{ name: 'Bash', status: 'done' }]);
+    expect(sub.tools).toEqual([{ name: 'Bash', status: 'done', input: { command: 'npm test' } }]);
 
     // 已完成的子 Agent 不再被触碰。
     expect(settleRunningTools(settled)).toEqual(settled);
@@ -154,7 +158,7 @@ describe('taskEventStream', () => {
     const sub = (merged.payload?.subagent ?? {}) as SubagentRecord;
     // 内容取更完整的一边（live 多一段），工具按名合并且 done 优先。
     expect(sub.content).toBe('历史第一段\n实时新段落');
-    expect(sub.tools).toEqual([{ name: 'Read', status: 'done' }]);
+    expect(sub.tools).toEqual([expect.objectContaining({ name: 'Read', status: 'done' })]);
     expect(sub.status).toBe('running');
     expect(merged.id).toBe('subagent-entry-call_child');
   });

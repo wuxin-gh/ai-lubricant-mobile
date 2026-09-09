@@ -18,6 +18,8 @@ android/
 npm-debug.*
 yarn-debug.*
 yarn-error.*
+# 本地 Gradle 构建日志（EAS/本地 APK 构建产物，可重建）
+*.log
 
 # macOS
 .DS_Store

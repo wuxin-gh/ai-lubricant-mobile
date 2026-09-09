@@ -208,11 +208,14 @@ export function Track({ value, height = 6 }: { value: number; height?: number })
 }
 
 // ── 大标题（随内容滚动）─────────────────────────────────────────────────────────
-export function BigTitle({ title, sub }: { title: string; sub?: string }) {
+export function BigTitle({ title, sub, right }: { title: string; sub?: string; right?: React.ReactNode }) {
   const t = useTheme();
   return (
-    <View style={{ paddingHorizontal: spacing.pad, paddingTop:8,  paddingBottom: 2 }}>
-      <Text style={{ fontSize: 31, fontWeight: '500', letterSpacing: -0.9, color: t.tx, lineHeight: 39 }}>{title}</Text>
+    <View style={{ paddingHorizontal: spacing.pad, paddingTop: 8, paddingBottom: 2 }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', minHeight: 39 }}>
+        <Text style={{ flex: 1, fontSize: 31, fontWeight: '500', letterSpacing: -0.9, color: t.tx, lineHeight: 39 }}>{title}</Text>
+        {right ? <View style={{ marginLeft: 8 }}>{right}</View> : null}
+      </View>
       {sub ? <Text style={{ fontSize: 13, color: t.tx3, marginTop: 6, fontWeight: '500' }}>{sub}</Text> : null}
     </View>
   );
@@ -260,6 +263,8 @@ export function PrimaryButton({ label, icon, onPress, disabled, block, style }: 
 
 // ── 浮动玻璃头部（根屏：滚动时才淡入的折叠标题栏）────────────────────────────────
 // 未滚动时整条完全透明，大标题贴近状态栏；滚动后毛玻璃 + 居中标题一起淡入。
+// 折叠态下 right 槽的按钮可点（box-none：容器本身不吞触摸、子节点可交互）；
+// 未折叠（透明）时 pointerEvents=none，触摸穿透到大标题区的常驻入口。
 export function GlassTop({ title, right, collapsed }: { title: string; right?: React.ReactNode; collapsed: boolean }) {
   const t = useTheme();
   const insets = useSafeAreaInsets();
@@ -268,7 +273,7 @@ export function GlassTop({ title, right, collapsed }: { title: string; right?: R
     Animated.timing(op, { toValue: collapsed ? 1 : 0, duration: 180, useNativeDriver: true }).start();
   }, [collapsed, op]);
   return (
-    <Animated.View pointerEvents="none" style={{ position: 'absolute', top: 0, left: 0, right: 0, zIndex: 45, opacity: op }}>
+    <Animated.View pointerEvents={collapsed ? 'box-none' : 'none'} style={{ position: 'absolute', top: 0, left: 0, right: 0, zIndex: 45, opacity: op }}>
       <Glass radius={0} border intensity={52} style={{ borderBottomLeftRadius: 26, borderBottomRightRadius: 26 }}>
         <View style={{ height: insets.top }} />
         <View style={{ height: 46, flexDirection: 'row', alignItems: 'center', paddingHorizontal: spacing.pad }}>

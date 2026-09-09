@@ -6,7 +6,7 @@ import { ApiError, deleteTask, stopTask } from '@/api/client';
 import { listUserTasks, type UserTaskSummary } from '@/api/task';
 import { SwipeableRow } from '@/components/SwipeableRow';
 import { TaskCard } from '@/components/TaskCard';
-import { BigTitle, EmptyView, GlassTop, LoadingView } from '@/components/ui';
+import { BigTitle, EmptyView, GlassTop, IconButton, LoadingView } from '@/components/ui';
 import { taskDisplayName } from '@/utils/format';
 import { spacing, useTheme } from '@/theme';
 
@@ -98,7 +98,13 @@ export default function TasksScreen() {
 
   const Header = (
     <View>
-      <BigTitle title="智能任务" />
+      <BigTitle
+        title="智能任务"
+        right={(
+          <IconButton icon="plus" onPress={() => router.push('/new-task' as never)} iconSize={24} size={40}
+            style={{ backgroundColor: t.ac }} color={t.acInk} sw={2.4} />
+        )}
+      />
       <View style={{ flexDirection: 'row', gap: 8, paddingHorizontal: spacing.pad, paddingTop: 12, paddingBottom: 8 }}>
         {FILTERS.map((f) => {
           const on = filter === f.k;
@@ -146,7 +152,7 @@ export default function TasksScreen() {
           ) : error ? (
             <View style={{ paddingTop: 40 }}><EmptyView title="加载失败" subtitle={error} icon="alert" /></View>
           ) : (
-            <View style={{ paddingTop: 40 }}><EmptyView title={filter === 'running' ? '没有进行中的任务' : '还没有已结束的任务'} subtitle={filter === 'running' ? '点右下角 + 发起一个 AI 任务' : undefined} /></View>
+            <View style={{ paddingTop: 40 }}><EmptyView title={filter === 'running' ? '没有进行中的任务' : '还没有已结束的任务'} subtitle={filter === 'running' ? '点右上角 + 发起一个 AI 任务' : undefined} /></View>
           )
         }
         ListFooterComponent={
@@ -155,7 +161,10 @@ export default function TasksScreen() {
             : null
         }
       />
-      <GlassTop title="任务" collapsed={collapsed} />
+      <GlassTop title="任务" collapsed={collapsed} right={(
+        <IconButton icon="plus" onPress={() => router.push('/new-task' as never)} iconSize={20} size={34}
+          style={{ backgroundColor: t.ac }} color={t.acInk} sw={2.4} />
+      )} />
     </View>
   );
 }

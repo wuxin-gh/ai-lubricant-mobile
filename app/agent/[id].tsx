@@ -159,6 +159,7 @@ export default function AgentConversationScreen() {
       />
       <GlassNav title={conv.conversation?.title || 'Agent 对话'} onBack={() => router.back()} right={(
         <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+          <Pressable onPress={() => router.push('/agent/new' as never)} hitSlop={8} style={{ padding: 8 }}><Icons.plus size={21} color={t.acTx} sw={2.2} /></Pressable>
           <Pressable onPress={() => setSettingsOpen(true)} hitSlop={8} style={{ padding: 8 }}><Icons.settings size={19} color={t.tx2} sw={2} /></Pressable>
           {conv.streaming ? <Pressable onPress={conv.abort} hitSlop={8} style={{ padding: 8, flexDirection: 'row', alignItems: 'center', gap: 5 }}><Icons.stop size={16} color={t.red} sw={2.2} /><Text style={{ color: t.red, fontSize: 13.5, fontWeight: '700' }}>停止</Text></Pressable> : null}
         </View>

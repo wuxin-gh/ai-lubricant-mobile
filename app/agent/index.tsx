@@ -1,18 +1,20 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFocusEffect, useRouter } from 'expo-router';
 import React, { useCallback, useRef, useState } from 'react';
-import { Alert, FlatList, Pressable, Text, View } from 'react-native';
+import { Alert, FlatList, Pressable, RefreshControl, Text, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ApiError } from '@/api/client';
 import { batchDeleteAgentConversations, deleteAgentConversation, listAgentConversationsPage, listAgents, type AgentConversation, type AgentDef } from '@/api/agent';
 import { SearchableSelect } from '@/components/admin-ui';
 import { Icons } from '@/components/Icons';
-import { BigTitle, EmptyView, GlassNav, LoadingView } from '@/components/ui';
+import { BigTitle, EmptyView, GlassNav, GlassTop, IconButton, LoadingView } from '@/components/ui';
 import { spacing, useTheme } from '@/theme';
 
 const SELECTED_AGENT_KEY = 'mc.agent.selectedId';
 
 export default function AgentListScreen() {
   const t = useTheme();
+  const insets = useSafeAreaInsets();
   const router = useRouter();
   const [items, setItems] = useState<AgentConversation[]>([]);
   const [loading, setLoading] = useState(true);
@@ -24,6 +26,7 @@ export default function AgentListScreen() {
   const [agentPickerOpen, setAgentPickerOpen] = useState(false);
   const [selecting, setSelecting] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [collapsed, setCollapsed] = useState(false);
   const cursorRef = useRef<string | null>(null);
   const hasMoreRef = useRef(false);
 
@@ -90,46 +93,71 @@ export default function AgentListScreen() {
     ]);
   };
 
-  if (loading && !items.length) return <View style={{ flex: 1, backgroundColor: t.bg }}><LoadingView label="加载 Agent 对话…" /><GlassNav title="Agent" onBack={() => router.back()} /></View>;
+  if (loading && !items.length) return <View style={{ flex: 1, backgroundColor: t.bg }}><LoadingView label="加载 Agent 对话…" /></View>;
 
   return (
     <View style={{ flex: 1, backgroundColor: t.bg }}>
       <FlatList
         data={items}
         keyExtractor={(item) => item.id}
-        contentContainerStyle={{ paddingTop: spacing.pad + 48, paddingHorizontal: spacing.pad, paddingBottom: 40, flexGrow: 1 }}
-        refreshing={refreshing}
-        onRefresh={() => { void load(true, selectedAgentId); }}
+        contentContainerStyle={{ paddingTop: insets.top + 8, paddingBottom: insets.bottom + 116, flexGrow: 1 }}
+        scrollIndicatorInsets={{ top: insets.top + 46 }}
+        onScroll={(e) => { const y = e.nativeEvent.contentOffset.y; setCollapsed((c) => (c !== y > 26 ? y > 26 : c)); }}
+        scrollEventThrottle={16}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { void load(true, selectedAgentId); }} tintColor={t.ac} progressViewOffset={insets.top + 46} />}
         onEndReached={() => { void loadMore(); }}
         onEndReachedThreshold={0.4}
-        ListHeaderComponent={<View><BigTitle title="Agent 对话" sub={selecting ? `已选 ${selected.size} 个` : '让 Agent 帮你分析、实现和处理任务'} /><Pressable onPress={() => setAgentPickerOpen(true)} style={({ pressed }) => [{ marginTop: 12, minHeight: 50, borderRadius: 14, paddingHorizontal: 13, backgroundColor: t.bg2, borderWidth: 1, borderColor: t.line2, flexDirection: 'row', alignItems: 'center', gap: 10 }, pressed && { opacity: 0.75 }]}><View style={{ width: 34, height: 34, borderRadius: 10, backgroundColor: t.acGhost, alignItems: 'center', justifyContent: 'center' }}><Icons.brain size={18} color={t.acTx} sw={1.9} /></View><View style={{ flex: 1 }}><Text style={{ color: t.tx3, fontSize: 11 }}>当前 Agent</Text><Text numberOfLines={1} style={{ color: t.tx, fontSize: 14.5, fontWeight: '700', marginTop: 2 }}>{agents.find((agent) => agent.id === selectedAgentId)?.display_name || agents.find((agent) => agent.id === selectedAgentId)?.name || '暂无可用 Agent'}</Text></View><Icons.chevron size={16} color={t.tx3} /></Pressable></View>}
+        ListHeaderComponent={(
+          <View>
+            <BigTitle
+              title="Agent 对话"
+              right={<IconButton icon="sliders" onPress={() => router.push('/agent/manage' as never)} size={40} iconSize={21} />}
+            />
+            <View style={{ flexDirection: 'row', gap: 8, paddingHorizontal: spacing.pad, paddingTop: 12 }}>
+              <Pressable onPress={() => setAgentPickerOpen(true)} style={({ pressed }) => [{ flex: 1, minHeight: 50, borderRadius: 14, paddingHorizontal: 13, backgroundColor: t.bg2, borderWidth: 1, borderColor: t.line2, flexDirection: 'row', alignItems: 'center', gap: 10 }, pressed && { opacity: 0.75 }]}>
+                <View style={{ width: 34, height: 34, borderRadius: 10, backgroundColor: t.acGhost, alignItems: 'center', justifyContent: 'center' }}><Icons.brain size={18} color={t.acTx} sw={1.9} /></View>
+                <View style={{ flex: 1 }}><Text style={{ color: t.tx3, fontSize: 11 }}>当前 Agent</Text><Text numberOfLines={1} style={{ color: t.tx, fontSize: 14.5, fontWeight: '700', marginTop: 2 }}>{agents.find((agent) => agent.id === selectedAgentId)?.display_name || agents.find((agent) => agent.id === selectedAgentId)?.name || '暂无可用 Agent'}</Text></View>
+                <Icons.chevron size={16} color={t.tx3} />
+              </Pressable>
+              <Pressable onPress={() => router.push({ pathname: '/agent/new', params: selectedAgentId ? { agentId: String(selectedAgentId) } : {} } as never)} hitSlop={4} style={({ pressed }) => [{ width: 50, height: 50, borderRadius: 14, backgroundColor: t.ac, alignItems: 'center', justifyContent: 'center' }, pressed && { transform: [{ scale: 0.96 }] }]}>
+                <Icons.plus size={23} color={t.acInk} sw={2.4} />
+              </Pressable>
+            </View>
+          </View>
+        )}
         renderItem={({ item }) => {
           const checked = selected.has(item.id);
           return (
-            <Pressable
-              onPress={() => selecting ? toggleSelect(item.id) : router.push(`/agent/${item.id}` as never)}
-              onLongPress={() => { if (!selecting) { setSelecting(true); toggleSelect(item.id); } else remove(item); }}
-              style={({ pressed }) => [{ marginTop: spacing.gap, padding: 16, borderRadius: 16, backgroundColor: checked ? t.acGhost : t.bg2, borderWidth: 1, borderColor: checked ? t.ac : t.line2, ...t.shCard }, pressed && { opacity: 0.75 }]}
-            >
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 11 }}>
-                <View style={{ width: 40, height: 40, borderRadius: 12, backgroundColor: t.acGhost, alignItems: 'center', justifyContent: 'center' }}><Icons.sparkle size={21} color={t.acTx} sw={1.9} /></View>
-                <View style={{ flex: 1, minWidth: 0 }}>
-                  <Text numberOfLines={1} style={{ color: t.tx, fontSize: 15, fontWeight: '700' }}>{item.title || '新对话'}</Text>
-                  <Text numberOfLines={1} style={{ marginTop: 4, color: t.tx3, fontSize: 11.5 }}>{item.model || '默认模型'}</Text>
+            <View style={{ paddingHorizontal: spacing.pad }}>
+              <Pressable
+                onPress={() => selecting ? toggleSelect(item.id) : router.push(`/agent/${item.id}` as never)}
+                onLongPress={() => { if (!selecting) { setSelecting(true); toggleSelect(item.id); } else remove(item); }}
+                style={({ pressed }) => [{ marginTop: spacing.gap, padding: 16, borderRadius: 16, backgroundColor: checked ? t.acGhost : t.bg2, borderWidth: 1, borderColor: checked ? t.ac : t.line2, ...t.shCard }, pressed && { opacity: 0.75 }]}
+              >
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 11 }}>
+                  <View style={{ width: 40, height: 40, borderRadius: 12, backgroundColor: t.acGhost, alignItems: 'center', justifyContent: 'center' }}><Icons.sparkle size={21} color={t.acTx} sw={1.9} /></View>
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    <Text numberOfLines={1} style={{ color: t.tx, fontSize: 15, fontWeight: '700' }}>{item.title || '新对话'}</Text>
+                    <Text numberOfLines={1} style={{ marginTop: 4, color: t.tx3, fontSize: 11.5 }}>{item.model || '默认模型'}</Text>
+                  </View>
+                  {selecting ? <View style={{ width: 22, height: 22, borderRadius: 7, borderWidth: 1.5, borderColor: checked ? t.ac : t.line2, backgroundColor: checked ? t.ac : 'transparent', alignItems: 'center', justifyContent: 'center' }}>{checked ? <Icons.check size={13} color={t.acInk} sw={3} /> : null}</View> : <Icons.chevron size={17} color={t.tx3} sw={1.8} />}
                 </View>
-                {selecting ? <View style={{ width: 22, height: 22, borderRadius: 7, borderWidth: 1.5, borderColor: checked ? t.ac : t.line2, backgroundColor: checked ? t.ac : 'transparent', alignItems: 'center', justifyContent: 'center' }}>{checked ? <Icons.check size={13} color={t.acInk} sw={3} /> : null}</View> : <Icons.chevron size={17} color={t.tx3} sw={1.8} />}
-              </View>
-            </Pressable>
+              </Pressable>
+            </View>
           );
         }}
-        ListEmptyComponent={error ? <View style={{ flex: 1, minHeight: 260 }}><EmptyView title="加载失败" subtitle={error} icon="alert" /></View> : <View style={{ flex: 1, minHeight: 260 }}><EmptyView title="还没有 Agent 对话" subtitle="点击右上角新建一个对话" icon="sparkle" /></View>}
+        ListEmptyComponent={error ? <View style={{ flex: 1, minHeight: 260 }}><EmptyView title="加载失败" subtitle={error} icon="alert" /></View> : <View style={{ flex: 1, minHeight: 260 }}><EmptyView title="还没有 Agent 对话" subtitle="点上方 + 新建一个对话" icon="sparkle" /></View>}
         ListFooterComponent={loadingMore ? <Text style={{ textAlign: 'center', color: t.tx3, fontSize: 12, paddingVertical: 14 }}>加载中…</Text> : null}
       />
-      <GlassNav
-        title="Agent"
-        onBack={() => router.back()}
-        right={selecting ? <View style={{ flexDirection: 'row', alignItems: 'center' }}><Pressable onPress={batchRemove} disabled={!selected.size} hitSlop={8} style={{ padding: 8, opacity: selected.size ? 1 : 0.4 }}><Icons.trash size={20} color={t.red} sw={2} /></Pressable><Pressable onPress={exitSelecting} hitSlop={8} style={{ padding: 8 }}><Text style={{ color: t.acTx, fontSize: 13.5, fontWeight: '700' }}>完成</Text></Pressable></View> : <View style={{ flexDirection: 'row', alignItems: 'center' }}><Pressable onPress={() => router.push('/agent/manage' as never)} hitSlop={8} style={{ padding: 8 }}><Icons.settings size={19} color={t.tx2} sw={2} /></Pressable><Pressable onPress={() => router.push({ pathname: '/agent/new', params: selectedAgentId ? { agentId: String(selectedAgentId) } : {} } as never)} hitSlop={8} style={{ padding: 8 }}><Icons.plus size={21} color={t.acTx} sw={2.2} /></Pressable></View>}
-      />
+      {selecting ? (
+        <GlassNav
+          title={`已选 ${selected.size} 个`}
+          onBack={exitSelecting}
+          right={<View style={{ flexDirection: 'row', alignItems: 'center' }}><Pressable onPress={batchRemove} disabled={!selected.size} hitSlop={8} style={{ padding: 8, opacity: selected.size ? 1 : 0.4 }}><Icons.trash size={20} color={t.red} sw={2} /></Pressable><Pressable onPress={exitSelecting} hitSlop={8} style={{ padding: 8 }}><Text style={{ color: t.acTx, fontSize: 13.5, fontWeight: '700' }}>完成</Text></Pressable></View>}
+        />
+      ) : (
+        <GlassTop title="Agent" collapsed={collapsed} />
+      )}
       <SearchableSelect visible={agentPickerOpen} title="选择 Agent" options={agents.map((agent) => ({ value: String(agent.id), label: agent.display_name || agent.name || `Agent #${agent.id}`, sub: agent.description || agent.main_model || undefined, keywords: `${agent.name || ''} ${agent.main_model || ''}` }))} selected={selectedAgentId ? [String(selectedAgentId)] : []} onChange={(values) => { const next = Number(values[0]); setSelectedAgentId(next || null); if (next) { void AsyncStorage.setItem(SELECTED_AGENT_KEY, String(next)); void load(true, next); } }} onClose={() => setAgentPickerOpen(false)} emptyText="暂无可用 Agent" />
     </View>
   );

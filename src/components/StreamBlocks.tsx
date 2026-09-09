@@ -349,7 +349,9 @@ function toolDetail(m: ToolMsg): string {
   try { return Object.keys(ri).length ? JSON.stringify(ri, null, 2) : ''; } catch { return ''; }
 }
 
-function ToolCard({ msg, t, onCopy }: { msg: ToolMsg; t: Theme; onCopy?: (s: string) => void }) {
+/** 工具调用卡：两行标题（动作 + 目标），可展开看 diff / 命令输出 / 入参。
+ *  导出给任务对话面板的子 Agent 详情页复用（同一套工具渲染）。 */
+export function ToolCard({ msg, t, onCopy }: { msg: ToolMsg; t: Theme; onCopy?: (s: string) => void }) {
   const [open, setOpen] = useState(false);
   const I = Icons[toolIcon(msg.toolKind)] ?? Icons.cube;
   const running = msg.status === 'in_progress' || msg.status === 'pending';
@@ -564,39 +566,29 @@ function AttachmentBlock({ attachment, t, onCopy }: { attachment: AgentAttachmen
   );
 }
 
-function SubagentBlock({ message, t }: { message: Extract<ChatMessage, { kind: 'subagent' }>; t: Theme }) {
-  const [open, setOpen] = useState(false);
+// 子 Agent 卡：对话流里的入口（对齐 Web SubagentInlineEntry）——点击切换到
+// 子 Agent 详情对话页，不在卡内展开（正文/工具/小结都归详情页展示）。
+function SubagentBlock({ message, t, onOpen }: { message: Extract<ChatMessage, { kind: 'subagent' }>; t: Theme; onOpen?: (subagentId: string) => void }) {
   const running = message.status === 'running';
+  const failed = message.status === 'error';
+  const statusText = running ? '进行中' : failed ? '出错' : '已完成';
   return (
     <View style={{ backgroundColor: t.bg2, borderWidth: 1, borderColor: running ? t.acLine : t.line, borderRadius: 13, overflow: 'hidden' }}>
-      <Pressable onPress={() => setOpen((v) => !v)} style={{ flexDirection: 'row', alignItems: 'center', gap: 10, padding: 12 }}>
+      <Pressable onPress={() => onOpen?.(message.subagentId)} style={({ pressed }) => [{ flexDirection: 'row', alignItems: 'center', gap: 10, padding: 12 }, pressed && { opacity: 0.75 }]}>
         <View style={{ width: 28, height: 28, borderRadius: 8, backgroundColor: t.acGhost, alignItems: 'center', justifyContent: 'center' }}>
           <Icons.brain size={15} color={t.acTx} sw={1.9} />
         </View>
         <View style={{ flex: 1, minWidth: 0 }}>
-          <Text numberOfLines={1} style={{ color: t.tx, fontSize: 13.5, fontWeight: '700' }}>{message.name || '子 Agent'}</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+            <Text numberOfLines={1} style={{ color: t.tx, fontSize: 13.5, fontWeight: '700', flexShrink: 1 }}>{message.name || '子 Agent'}</Text>
+            <Text style={{ color: t.acTx, fontSize: 9, fontWeight: '800', backgroundColor: t.acGhost, borderRadius: 5, overflow: 'hidden', paddingHorizontal: 5, paddingVertical: 1.5 }}>子 Agent</Text>
+          </View>
           {message.task ? <Text numberOfLines={1} style={{ color: t.tx3, fontSize: 11.5, marginTop: 2 }}>{message.task}</Text> : null}
         </View>
-        {running ? <Spinner size={15} color={t.acTx} sw={2} /> : <Icons.check size={16} color={t.add} sw={2.3} />}
-        <Icons.chevron size={13} color={t.tx3} sw={2} style={{ transform: [{ rotate: open ? '90deg' : '0deg' }] }} />
+        {running ? <Spinner size={15} color={t.acTx} sw={2} /> : <Icons.check size={16} color={failed ? t.red : t.add} sw={2.3} />}
+        <Text style={{ color: running ? t.acTx : failed ? t.red : t.tx3, fontSize: 11, fontWeight: '700' }}>{statusText}</Text>
+        <Icons.chevron size={13} color={t.tx3} sw={2} />
       </Pressable>
-      {open ? (
-        <View style={{ borderTopWidth: StyleSheet.hairlineWidth, borderColor: t.line, padding: 12, gap: 8 }}>
-          {message.text ? <Text style={{ color: t.tx2, fontSize: 13, lineHeight: 19 }}>{message.text}</Text> : null}
-          {message.summary ? <Text style={{ color: t.tx, fontSize: 13, lineHeight: 19, fontWeight: '600' }}>总结：{message.summary}</Text> : null}
-          {message.tools?.length ? (
-            <View style={{ gap: 5 }}>
-              {message.tools.map((tool, i) => (
-                <View key={`${tool.name}-${i}`} style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                  {tool.status === 'done' ? <Icons.check size={12} color={t.add} sw={2.2} /> : <Spinner size={12} color={t.acTx} sw={2} />}
-                  <Text style={{ color: t.tx3, fontSize: 11.5, fontFamily: 'monospace' }}>{tool.name}</Text>
-                </View>
-              ))}
-            </View>
-          ) : null}
-          {!message.text && !message.summary && !message.tools?.length ? <Text style={{ color: t.tx3, fontSize: 12 }}>子 Agent 正在工作…</Text> : null}
-        </View>
-      ) : null}
     </View>
   );
 }
@@ -654,7 +646,7 @@ function ApprovalBlock({ message, t, onResolve }: { message: Extract<ChatMessage
   );
 }
 
-function StreamBlockBase({ message, canAnswer, answerSubmitState, isStreaming, onAnswer, onCopy, onSaveImage, onResolveApproval, onRetry, retryBusy }: { message: ChatMessage; canAnswer?: boolean; answerSubmitState?: AnswerSubmitState; isStreaming?: boolean; onAnswer?: (askId: string, answers: AnswerMap) => AnswerSubmitResult; onCopy?: (text: string) => void; onSaveImage?: (url: string) => void; onResolveApproval?: (approvalId: string, result: 'allow' | 'deny') => void; onRetry?: () => void; retryBusy?: boolean }) {
+function StreamBlockBase({ message, canAnswer, answerSubmitState, isStreaming, onAnswer, onCopy, onSaveImage, onResolveApproval, onRetry, retryBusy, onOpenSubagent }: { message: ChatMessage; canAnswer?: boolean; answerSubmitState?: AnswerSubmitState; isStreaming?: boolean; onAnswer?: (askId: string, answers: AnswerMap) => AnswerSubmitResult; onCopy?: (text: string) => void; onSaveImage?: (url: string) => void; onResolveApproval?: (approvalId: string, result: 'allow' | 'deny') => void; onRetry?: () => void; retryBusy?: boolean; onOpenSubagent?: (subagentId: string) => void }) {
   const t = useTheme();
   switch (message.kind) {
     case 'user': {
@@ -696,7 +688,7 @@ function StreamBlockBase({ message, canAnswer, answerSubmitState, isStreaming, o
     case 'approval':
       return <ApprovalBlock message={message} t={t} onResolve={onResolveApproval} />;
     case 'subagent':
-      return <SubagentBlock message={message} t={t} />;
+      return <SubagentBlock message={message} t={t} onOpen={onOpenSubagent} />;
     default:
       return null;
   }
@@ -723,7 +715,8 @@ export const StreamBlock = React.memo(StreamBlockBase, (a, b) => {
       m.name === n.name &&
       m.task === n.task &&
       m.summary === n.summary &&
-      JSON.stringify(m.tools) === JSON.stringify(n.tools)
+      JSON.stringify(m.tools) === JSON.stringify(n.tools) &&
+      a.onOpenSubagent === b.onOpenSubagent
     );
   }
   return (

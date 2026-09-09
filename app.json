@@ -2,7 +2,7 @@
   "expo": {
     "name": "Ai Lubricant",
     "slug": "ai-lubricant",
-    "version": "260902",
+    "version": "260909",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "scheme": "ailubricant",
@@ -28,10 +28,11 @@
     },
     "android": {
       "package": "com.ailubricant.mobile",
-      "versionCode": 260902,
+      "versionCode": 260909,
       "permissions": [
         "RECORD_AUDIO",
-        "REQUEST_INSTALL_PACKAGES"
+        "REQUEST_INSTALL_PACKAGES",
+        "POST_NOTIFICATIONS"
       ],
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
@@ -62,6 +63,12 @@
       ],
       "expo-sharing",
       [
+        "expo-notifications",
+        {
+          "color": "#1FA855"
+        }
+      ],
+      [
         "expo-image-picker",
         {
           "photosPermission": "用于选择图片作为对话附件发送给 AI"
@@ -77,11 +84,15 @@
       ],
       "./plugins/withDouyinLogin",
       "./plugins/withAndroidFileSaver",
+      "./plugins/withLanDiscovery",
       [
         "expo-build-properties",
         {
           "ios": {
             "buildReactNativeFromSource": true
+          },
+          "android": {
+            "usesCleartextTraffic": true
           }
         }
       ]

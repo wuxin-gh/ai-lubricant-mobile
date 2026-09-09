@@ -8,16 +8,18 @@
  * - 任务信息、Key 与危险操作收进“更多”，不再用绝对定位底栏盖住输入框。
  */
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Modal, Pressable, ScrollView, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { ApiError } from '@/api/client';
+import { ApiError, listNodes } from '@/api/client';
+import type { Node } from '@/api/types';
 import {
   cancelUserTask,
   deleteUserTask,
   disableUserTaskKey,
   getUserTask,
   getUserTaskStats,
+  restartUserTask,
   rotateUserTaskKey,
   stopUserTask,
   switchUserTaskModel,
@@ -26,18 +28,17 @@ import {
   type UserTaskStats,
 } from '@/api/task';
 import { listChatModels, type AvailableModel } from '@/api/agent';
-import { useBackgroundPolling } from '@/hooks/useBackgroundPolling';
 import { Card, EmptyView, GlassNav, LoadingView, Scrim, Toast } from '@/components/ui';
 import { DetailRow } from '@/components/admin-ui';
 import { Icons } from '@/components/Icons';
 import { TaskConversationPanel } from '@/features/task/TaskConversationPanel';
 import { TaskFilesPanel } from '@/features/task/TaskFilesPanel';
+import { TaskLogsSheet, TaskPortsSheet } from '@/features/task/TaskWorkspaceSheets';
 import { TaskResourcePanel } from '@/features/task/TaskResourcePanel';
 import { describeTaskRuntimeState } from '@/features/task/taskRuntimeState';
+import { nodeHealthOf, nodeModeOptions } from '@/features/task/nodeHealth';
 import { formatDateTime, taskDisplayName } from '@/utils/format';
 import { spacing, useTheme, type Theme } from '@/theme';
-
-const POLL_INTERVAL = 5000;
 
 type Tab = 'conversation' | 'files';
 
@@ -76,6 +77,24 @@ function formatTaskDate(value?: string | number | null): string {
   return Number.isNaN(d.getTime()) ? value : d.toLocaleString();
 }
 
+/** 对齐 Web formatLimit：未设置显示「未设置」，数字千分位。 */
+function formatLimit(value: unknown): string {
+  if (value === null || value === undefined || value === '') return '未设置';
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric.toLocaleString() : String(value);
+}
+
+const NODE_ROLE_LABELS: Record<string, string> = { execution: '执行节点', management: '管理节点' };
+
+/** 环境档位小徽标（对齐 Web task-detail 顶栏：隔离是默认档不显示）。 */
+function HeaderChip({ label, tone, t }: { label: string; tone?: string; t: Theme }) {
+  return (
+    <View style={{ borderWidth: 1, borderColor: tone || t.line, borderRadius: 7, paddingHorizontal: 6, paddingVertical: 2 }}>
+      <Text style={{ color: tone || t.tx3, fontSize: 10, fontWeight: '600' }}>{label}</Text>
+    </View>
+  );
+}
+
 export default function TaskWorkspaceScreen() {
   const t = useTheme();
   const insets = useSafeAreaInsets();
@@ -85,6 +104,7 @@ export default function TaskWorkspaceScreen() {
   const [task, setTask] = useState<UserTaskDetail | null>(null);
   const [stats, setStats] = useState<UserTaskStats>({ input_tokens: 0, output_tokens: 0, total_tokens: 0, llm_requests: 0 });
   const [models, setModels] = useState<AvailableModel[]>([]);
+  const [nodes, setNodes] = useState<Node[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState<null | 'start' | 'stop' | 'delete' | 'restart' | 'key' | 'model' | 'mode' | 'effort'>(null);
@@ -92,7 +112,12 @@ export default function TaskWorkspaceScreen() {
   const [tab, setTab] = useState<Tab>('conversation');
   const [moreOpen, setMoreOpen] = useState(false);
   const [infoOpen, setInfoOpen] = useState(false);
+  const [logsOpen, setLogsOpen] = useState(false);
+  const [portsOpen, setPortsOpen] = useState(false);
   const busyRef = useRef(false);
+  // 节点列表失败时回退取最新值用 ref，不进 refresh 依赖（见下）。
+  const nodesRef = useRef<Node[]>([]);
+  nodesRef.current = nodes;
 
   const flashToast = useCallback((msg: string) => {
     setToast(msg);
@@ -106,19 +131,29 @@ export default function TaskWorkspaceScreen() {
     return detail;
   }, [id]);
 
+  // 与 Web task-detail 同构：refresh 只随 taskId 变化（mount / 切任务各一次），
+  // 绝不把 nodes 放进依赖——listNodes() 每次回新数组引用，会让 refresh 身份翻新、
+  // 下面的 mount effect 自激发成无限轮询，把详情/统计/模型/节点四个接口刷爆。
+  // 节点回退值改走 ref。运行态不轮询：靠 SSE 推内容，轮次结束（terminal 帧）
+  // 经 TaskConversationPanel 的 onResult 触发本 refresh；只有准备期拿不到 SSE
+  // 时才单独 2 秒轮询 loadDetail（与 Web 一致）。
   const refresh = useCallback(async () => {
     if (!id) return;
     try {
       const detail = await getUserTask(id);
       // Web 以父 Key 的可用范围拉模型；任务子 Key 是运行时凭据，不适合做选择器授权入口。
       const modelKeyId = detail.parent_api_key_id || detail.api_key_id;
-      const [nextStats, modelRows] = await Promise.all([
+      const [nextStats, modelRows, nodeRows] = await Promise.all([
         getUserTaskStats(id).catch(() => ({ input_tokens: 0, output_tokens: 0, total_tokens: 0, llm_requests: 0 }) as UserTaskStats),
         modelKeyId ? listChatModels(Number(modelKeyId)).catch(() => [] as AvailableModel[]) : Promise.resolve([] as AvailableModel[]),
+        // 节点列表是健康对账的依据（Web useCommonData().nodes）；失败时保留上一批，
+        // 不让一次网络抖动把「节点正常」闪成「节点不存在」。
+        listNodes().catch(() => nodesRef.current),
       ]);
       setTask(detail);
       setStats(nextStats);
       setModels(modelRows);
+      setNodes(nodeRows);
       setError('');
     } catch (e) {
       setError(e instanceof ApiError ? e.message : '加载失败');
@@ -130,7 +165,6 @@ export default function TaskWorkspaceScreen() {
   useEffect(() => { void refresh(); }, [refresh]);
 
   const isRunning = task?.status === 'pending' || task?.status === 'processing';
-  useBackgroundPolling(refresh, POLL_INTERVAL, !!id && isRunning && !task?.runtime_stage?.preparing);
 
   // 准备期拿不到对话 SSE，2 秒轮询准备步骤；就绪/失败即停。
   useEffect(() => {
@@ -205,6 +239,15 @@ export default function TaskWorkspaceScreen() {
     await runAction('effort', () => updateUserTask(task.id, { reasoning_effort: effort }), '思考等级已切换，下一轮消息生效');
   }, [runAction, task]);
 
+  // 绑定节点实时对账（Web editorNodeHealth）：节点被删/吊销/掉线时任务跑不起来，
+  // 顶栏直接标红；对账结果同时驱动节点感知的权限模式选项。useMemo 必须在早退
+  // return 之前无条件调用（Rules of Hooks），task 未加载时按无绑定节点对账。
+  const nodeHealth = useMemo(() => nodeHealthOf(task?.node_id, nodes), [nodes, task?.node_id]);
+  const boundNode = nodeHealth.node;
+  // 节点能力松散结构：os/arch/docker/client_version/…（仅展示兜底字段，不强约束）。
+  const nodeCaps = (boundNode?.capabilities || {}) as { os?: string; arch?: string; docker?: string; client_version?: string };
+  const modeOptions = useMemo(() => nodeModeOptions(boundNode, task?.provider) || undefined, [boundNode, task?.provider]);
+
   if (loading) {
     return <View style={{ flex: 1, backgroundColor: t.bg }}><LoadingView label="加载任务工作区…" /><GlassNav title="任务工作区" onBack={() => router.back()} /></View>;
   }
@@ -242,7 +285,13 @@ export default function TaskWorkspaceScreen() {
               <Text style={{ color: t.tx3, fontSize: 11.5 }}>{task.provider}</Text>
               <View style={{ width: 4, height: 4, borderRadius: 99, backgroundColor: statusTone }} />
               <Text style={{ color: statusTone, fontSize: 11.5, fontWeight: '700' }}>{taskStateLabel(task)}</Text>
-              {task.node_id ? <Text numberOfLines={1} style={{ maxWidth: 150, color: t.tx3, fontSize: 10.5, fontFamily: 'monospace' }}>{task.node_id}</Text> : null}
+              {task.env_mode === 'system' ? <HeaderChip label="环境：系统内置" t={t} /> : null}
+              {task.env_mode === 'shared' ? <HeaderChip label={`环境：共用${task.env_name ? ` · ${task.env_name}` : ''}`} t={t} /> : null}
+              {/* 节点对账（Web editorNodeHealth）：异常标红并给原因，正常给节点名，
+                  自动节点（无 node_id）中性。比把 node_id 当 mono 文本更可读。 */}
+              <Text numberOfLines={1} style={{ maxWidth: 200, color: nodeHealth.abnormal ? t.red : boundNode ? t.add : t.tx3, fontSize: 11, fontWeight: '600' }}>
+                节点：{nodeHealth.abnormal ? nodeHealth.label : (boundNode?.node_name || task.node_id || '自动节点')}
+              </Text>
             </View>
           </View>
           <Pressable onPress={() => setMoreOpen(true)} hitSlop={8} style={{ width: 34, height: 34, borderRadius: 12, backgroundColor: t.bg3, alignItems: 'center', justifyContent: 'center' }}>
@@ -273,10 +322,12 @@ export default function TaskWorkspaceScreen() {
             statsTotalTokens={stats.total_tokens}
             models={models}
             modelMaxTokens={Number(currentModelMeta?.max_context_tokens) || undefined}
+            modeOptions={modeOptions}
             onResult={() => { void refresh(); }}
             onSwitchModel={switchModel}
             onSwitchMode={switchMode}
             onSwitchReasoningEffort={switchEffort}
+            onToast={flashToast}
           />
         ) : null}
         {tab === 'files' ? <TaskFilesPanel taskId={task.id} /> : null}
@@ -297,12 +348,16 @@ export default function TaskWorkspaceScreen() {
           <ScrollView contentContainerStyle={{ paddingHorizontal: 14, paddingBottom: 8, gap: 9 }}>
             <ActionRow icon="folder" label="工作区文件" sub={hasRuntime ? '查看任务工作目录与改动' : '运行时未就绪'} t={t} disabled={!hasRuntime} onPress={() => { setMoreOpen(false); setTab('files'); }} />
             <ActionRow icon="info" label="任务信息" sub={`${formatTokens(stats.total_tokens)} tokens · ${stats.llm_requests ?? 0} 次模型请求`} t={t} onPress={() => { setMoreOpen(false); setInfoOpen(true); }} />
+            <ActionRow icon="file" label="请求日志" sub="网关请求记录与请求/响应明细" t={t} onPress={() => { setMoreOpen(false); setLogsOpen(true); }} />
+            <ActionRow icon="eye" label="端口预览" sub={hasRuntime ? '工作区监听端口与预览链接' : '运行时未就绪'} t={t} disabled={!hasRuntime} onPress={() => { setMoreOpen(false); setPortsOpen(true); }} />
             <Text style={{ color: t.tx3, fontSize: 11.5, fontWeight: '700', paddingHorizontal: 6, paddingTop: 4 }}>运行期资源配置</Text>
             <View style={{ paddingHorizontal: 4, paddingTop: 2 }}>
               <TaskResourcePanel task={task} onChanged={() => void refresh()} />
             </View>
             {/* 没有独立「重启/开始运行」入口：删除是唯一不可恢复边界，没有运行时
-                时直接发送消息会自动恢复。 */}
+                时直接发送消息会自动恢复。重启运行环境是维护动作（清进程内上下文，
+                工作区与对话保留），只在运行中提供。 */}
+            {runtimeActive ? <ActionRow icon="refresh" label="重启运行环境" sub="清空进程内上下文；工作区与对话保留" t={t} disabled={!!busy} onPress={() => void runAction('restart', () => restartUserTask(task.id), '运行环境已重启')} /> : null}
             {runtimeActive ? <ActionRow icon="stop" label="停止任务运行时" sub="终止运行进程；任务详情、历史与工作区保留，发送消息即可恢复" t={t} tone="warn" disabled={!!busy} onPress={() => { setMoreOpen(false); onStop(); }} /> : null}
             {task.status === 'processing' ? <ActionRow icon="stop" label="取消当前轮次" sub="任务保持运行，可继续发消息" t={t} tone="warn" disabled={!!busy} onPress={() => void runAction('stop', () => cancelUserTask(task.id), '已请求取消当前轮次')} /> : null}
             <ActionRow icon="key" label="轮换 Task Key" sub={task.api_key?.key_masked || '未签发'} t={t} disabled={!!busy || task.api_key?.disabled} onPress={() => void onRotate()} />
@@ -323,15 +378,30 @@ export default function TaskWorkspaceScreen() {
           <ScrollView contentContainerStyle={{ paddingHorizontal: 14, paddingBottom: 20, gap: 10 }}>
             <Card style={{ paddingHorizontal: 14, paddingVertical: 7 }}>
               <DetailRow label="状态" value={taskStateLabel(task)} color={statusTone} />
+              <DetailRow label="任务 ID" value={task.id} mono />
+              <DetailRow label="类型" value={[task.kind, task.sub_type].filter(Boolean).join(' / ') || '未标注'} />
               <DetailRow label="工具" value={task.provider} />
               <DetailRow label="模型" value={currentModel || '默认'} mono />
+              <DetailRow label="可用模型" value={task.models?.length ? task.models.join('、') : '不限制'} />
               <DetailRow label="模式" value={task.mode_label || task.mode || '默认'} />
               <DetailRow label="思考等级" value={task.reasoning_effort || '默认'} />
-              <DetailRow label="节点" value={task.node_id || '未绑定'} mono />
+              {/* 绑定节点实时对账（Web TaskInfoPopover/NodeInfoPopover 同源）：异常标红。 */}
+              <DetailRow label="绑定节点" value={task.node_id ? (boundNode?.node_name || task.node_id) : '自动节点'} color={nodeHealth.abnormal ? t.red : undefined} />
+              {task.node_id ? <DetailRow label="节点 ID" value={task.node_id} mono /> : null}
+              {task.node_id ? <DetailRow label="节点状态" value={nodeHealth.abnormal ? nodeHealth.label : '正常'} color={nodeHealth.abnormal ? t.red : t.add} /> : null}
+              {nodeCaps.os || nodeCaps.arch ? <DetailRow label="系统" value={[nodeCaps.os, nodeCaps.arch].filter(Boolean).join(' / ')} /> : null}
+              {nodeCaps.client_version ? <DetailRow label="客户端版本" value={`v${String(nodeCaps.client_version).replace(/^v/i, '')}`} mono /> : null}
+              {nodeCaps.docker ? <DetailRow label="Docker" value={nodeCaps.docker === 'true' ? '支持' : '不支持'} /> : null}
+              {boundNode ? <DetailRow label="运行中会话" value={`${boundNode.active_sessions ?? 0} 个`} /> : null}
+              {boundNode?.last_heartbeat_at ? <DetailRow label="最近心跳" value={String(boundNode.last_heartbeat_at)} /> : null}
               <DetailRow label="运行时" value={task.node_session_id || '未启动'} mono />
               {task.env_mode ? <DetailRow label="环境" value={[task.env_mode, task.env_name || task.env_id].filter(Boolean).join(' · ')} /> : null}
               {task.repo_url ? <DetailRow label="仓库" value={task.repo_url} mono multiline /> : null}
               {task.branch ? <DetailRow label="分支" value={task.branch} mono /> : null}
+              <DetailRow label="API Key" value={task.api_key?.key_masked || '未签发'} mono />
+              <DetailRow label="请求上限" value={formatLimit(task.api_key?.usage_limit?.max_requests)} />
+              <DetailRow label="Token 上限" value={formatLimit(task.api_key?.usage_limit?.max_total_tokens)} />
+              <DetailRow label="Key 过期" value={task.api_key?.expires_at ? formatTaskDate(task.api_key.expires_at) : '未设置'} />
               <DetailRow label="创建时间" value={formatTaskDate(task.created_at)} />
               <DetailRow label="最后活跃" value={formatTaskDate(task.last_active_at)} />
               {task.completed_at ? <DetailRow label="完成时间" value={formatTaskDate(task.completed_at)} /> : null}
@@ -345,6 +415,9 @@ export default function TaskWorkspaceScreen() {
           </ScrollView>
         </View>
       </Modal>
+
+      {logsOpen ? <TaskLogsSheet taskId={task.id} onClose={() => setLogsOpen(false)} /> : null}
+      {portsOpen ? <TaskPortsSheet taskId={task.id} onClose={() => setPortsOpen(false)} /> : null}
     </View>
   );
 }

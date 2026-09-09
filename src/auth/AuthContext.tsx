@@ -18,6 +18,7 @@ import {
   setUnauthorizedHandler,
 } from '@/api/client';
 import { loadBasicAuth, loadPassword, migrateLegacy, saveBasicAuth, savePassword } from '@/auth/secrets';
+import { clearLocalPushBinding, registerForPush } from '@/notifications/push';
 import type { UserStatus } from '@/api/types';
 
 // 非敏感配置留在 AsyncStorage；敏感凭据（密码、Basic Auth）走 SecureStore（见 secrets.ts）。
@@ -75,6 +76,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUser(null);
     setModeState('user');
     setNeedsPortalChoice(false);
+    void clearLocalPushBinding();
     await AsyncStorage.multiSet([[STORAGE_LOGGED_IN, '0'], [STORAGE_MODE, 'user']]);
     await apiLogout();
   }, []);
@@ -127,6 +129,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             if (hasUserIdentity(u)) {
               setUser(u);
               setAuthenticated(true);
+              // 会话恢复成功：静默补一次推送注册（不阻塞 ready）。
+              void registerForPush();
             }
           } catch {
             // 会话失效，保持未登录
@@ -152,25 +156,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const cleanEmail = email.trim();
       const captchaToken = await obtainCaptchaToken(targetBaseUrl || baseUrl);
       await apiLogin(cleanEmail, password, captchaToken);
-      // 登录成功后拉取用户信息
-      let u: UserStatus = {};
-      try {
-        u = await getUserStatus();
-      } catch {
-        /* 忽略，仍视为已登录 */
-      }
-      // 非敏感配置走 AsyncStorage；密码走 SecureStore（不可用时不持久化，但不影响会话 Cookie）。
-      await AsyncStorage.multiSet([
-        [STORAGE_LOGGED_IN, '1'],
-        [STORAGE_EMAIL, cleanEmail],
+      // 登录成功后的三件事互不依赖，并行做（原来是串行：状态请求 → 存储 → 保存密码，
+      // 其中保存密码还内含 3 次串行 SecureStore 探测，拖慢进入首页的时间）。
+      const [, , user] = await Promise.all([
+        AsyncStorage.multiSet([
+          [STORAGE_LOGGED_IN, '1'],
+          [STORAGE_EMAIL, cleanEmail],
+        ]),
+        savePassword(rememberPassword ? password : ''),
+        // 登录成功后拉取用户信息（失败不视为登录失败）
+        getUserStatus().catch(() => ({}) as UserStatus),
       ]);
-      await savePassword(rememberPassword ? password : '');
       setSavedEmail(cleanEmail);
       setSavedPassword(rememberPassword ? password : '');
-      setUser(u);
-      setNeedsPortalChoice(isAdminUser(u));
+      setUser(user);
+      setNeedsPortalChoice(isAdminUser(user));
       setAuthenticated(true);
-      return u;
+      // 推送注册不进关键路径（不 await）：登录耗时已经过专门优化，注册失败也不影响任何功能。
+      void registerForPush();
+      return user;
     },
     [baseUrl],
   );
