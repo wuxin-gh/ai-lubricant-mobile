@@ -221,7 +221,10 @@ export interface AuthRepository {
   description?: string;
 }
 
-/** Git 身份凭证（对齐后端 domain.GitIdentity）。 */
+/** Git 身份凭证（对齐后端 domain.GitIdentity）。
+ *
+ * username 是服务端从 Git 平台反查出来的展示标签（不是凭据，token 自己完成认证），
+ * email 无人消费 —— 两者都不再让用户填，见 git-identity-form.tsx。 */
 export interface GitIdentity {
   id?: string;
   platform?: GitPlatform;
@@ -238,24 +241,22 @@ export interface GitIdentity {
   authorized_repositories?: AuthRepository[];
 }
 
-/** 添加 Git 身份请求体（对齐后端 domain.AddGitIdentityReq）。 */
+/** 添加 Git 身份请求体（对齐后端 domain.AddGitIdentityReq）。
+ * username / email 不再提交：username 由服务端反查，email 无人消费。 */
 export interface AddGitIdentityReq {
   platform: GitPlatform;
   base_url: string;
   access_token: string;
-  username: string;
-  email: string;
   remark?: string;
   organization_id?: string;
 }
 
-/** 更新 Git 身份请求体（对齐后端 domain.UpdateGitIdentityReq，字段均可选，只传需变更的）。 */
+/** 更新 Git 身份请求体（对齐后端 domain.UpdateGitIdentityReq，字段均可选，只传需变更的）。
+ * username / email 不提交：username 由服务端在换 token 时自动反查。 */
 export interface UpdateGitIdentityReq {
   platform?: GitPlatform;
   base_url?: string;
   access_token?: string;
-  username?: string;
-  email?: string;
   remark?: string;
   organization_id?: string;
 }
