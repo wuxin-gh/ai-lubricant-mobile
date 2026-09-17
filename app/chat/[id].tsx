@@ -8,7 +8,7 @@
 import * as Clipboard from 'expo-clipboard';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, FlatList, Image, Modal, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, FlatList, Image, Modal, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
 import { pickImages } from '@/api/upload';
@@ -350,13 +350,23 @@ export default function ChatConversationScreen() {
     const isLast = index === conv.messages.length - 1;
     const streamingNow = isLast && conv.streaming && item.kind === 'agent';
     const media = item.meta?.media;
+    // 首 token 未到（或上游静默）时气泡是空的，必须显式给个「生成中」，
+    // 否则用户只看到一片空白、分不清是在生成还是已经卡死。
+    const waitingFirstToken = streamingNow && !item.text;
     return (
       <View>
-        <StreamBlock
-          message={item}
-          isStreaming={streamingNow}
-          onCopy={async (txt) => { await Clipboard.setStringAsync(txt); setToast('已复制'); }}
-        />
+        {waitingFirstToken ? (
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 4 }}>
+            <ActivityIndicator size="small" color={t.acTx} />
+            <Text style={{ color: t.tx3, fontSize: 13 }}>生成中…</Text>
+          </View>
+        ) : (
+          <StreamBlock
+            message={item}
+            isStreaming={streamingNow}
+            onCopy={async (txt) => { await Clipboard.setStringAsync(txt); setToast('已复制'); }}
+          />
+        )}
         {media?.length ? <MediaResult items={media} t={t} onCopy={async (u) => { await Clipboard.setStringAsync(u); setToast('已复制媒体地址'); }} /> : null}
         {item.kind === 'agent' && !streamingNow ? <UsageFooter meta={item.meta} t={t} /> : null}
         {item.kind === 'error' ? (

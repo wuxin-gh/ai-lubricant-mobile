@@ -11,7 +11,7 @@ import * as MediaLibrary from 'expo-media-library';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as DocumentPicker from 'expo-document-picker';
 import { Platform } from 'react-native';
-import { authHeaders, getBaseUrl, request } from './client';
+import { authHeaders, errorMessageFromBody, getBaseUrl, request } from './client';
 
 export const MAX_ATTACHMENTS = 3;
 export const MAX_IMAGE_BYTES = 2 * 1024 * 1024; // 2MB（与 Web MAX_UPLOAD_FILE_SIZE 一致）
@@ -243,9 +243,9 @@ export async function uploadTaskImage(taskId: string, img: PickedImage): Promise
   );
   if (!response.ok) {
     const text = await response.text().catch(() => '');
-    let detail = text || `HTTP ${response.status}`;
-    try { detail = (JSON.parse(text) as { detail?: string }).detail || detail; } catch { /* keep text */ }
-    throw new Error(`附件上传失败：${detail}`);
+    let parsed: unknown = null;
+    try { parsed = JSON.parse(text); } catch { /* 非 JSON：退回纯文本 */ }
+    throw new Error(`附件上传失败：${errorMessageFromBody(parsed ?? text, response.status)}`);
   }
   const result = await response.json() as { url?: string; filename?: string };
   if (!result.url) throw new Error('附件上传失败：响应缺少 workspace URL');

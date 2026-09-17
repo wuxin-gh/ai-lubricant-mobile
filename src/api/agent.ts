@@ -8,7 +8,7 @@
  *
  * 唯一比 Web 多的一点：测试环境的 HTTP Basic Auth 头（authHeaders()），Web 同源不需要。
  */
-import { ApiError, authHeaders, getBaseUrl } from './client';
+import { ApiError, authHeaders, errorMessageFromBody, fetchStream, getBaseUrl } from './client';
 import { IncrementalSseParser } from './sse';
 
 /** 与 Web agentFetch 等价：裸 JSON + cookie 鉴权 + detail 错误提取。 */
@@ -25,14 +25,10 @@ async function agentFetch<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError((e as Error)?.message || '网络错误');
   }
   if (!r.ok) {
-    let detail = `HTTP ${r.status}`;
-    try {
-      const data = (await r.json()) as { detail?: string; message?: string };
-      detail = data?.detail || data?.message || detail;
-    } catch {
-      /* 解析失败保留默认 detail */
-    }
-    throw new ApiError(detail, undefined, r.status);
+    // /agent/* 挂在同一个 FastAPI app 上，HTTPException 同样被全局 handler 包成
+    // {error:{message}}；只读 detail/message 会丢掉真实原因。
+    const data = await r.json().catch(() => null);
+    throw new ApiError(errorMessageFromBody(data, r.status), undefined, r.status);
   }
   // 204 / 空响应容错（与 Web 一致）
   const text = await r.text();
@@ -428,14 +424,8 @@ export async function uploadAgentConversationAttachment(
     body,
   });
   if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
-    try {
-      const data = (await res.json()) as { detail?: string };
-      detail = data?.detail || detail;
-    } catch {
-      /* keep */
-    }
-    throw new ApiError(`附件上传失败：${detail}`, undefined, res.status);
+    const data = await res.json().catch(() => null);
+    throw new ApiError(`附件上传失败：${errorMessageFromBody(data, res.status)}`, undefined, res.status);
   }
   return (await res.json()) as ConversationAttachment;
 }
@@ -700,6 +690,45 @@ export async function listRuntimeModelOptions(apiKeyId: number): Promise<Array<{
     .filter((item): item is { value: string; label: string } => item !== null);
 }
 
+/** 来源分组：内置 / 平台管理 / 个人。 */
+export type AvailableMcpSource = 'builtin' | 'admin' | 'upstream';
+
+/** 可直接挂载到任务的 MCP 服务（内置 cdp-bridge / 邮箱 / 设备控制、平台管理、个人 SSE）。 */
+export interface AvailableMcpItem {
+  id: number;
+  name: string;
+  display_name: string;
+  source: AvailableMcpSource;
+  kind: string;
+  tool_count: number;
+  enabled: boolean;
+  description: string;
+}
+
+/**
+ * 用户可直接挂载的 MCP 服务全集（对齐 Web agentClient.listAvailableMcp）。
+ *
+ * 与资源中心的「团队引用型 MCP」是两条来源：本函数给的是**服务实例**（选
+ * ``{service_id}`` 绑定），引用型走资源池（选 ``{resource_id}``，服务端再转
+ * service_id）。创建任务时两者都下发。
+ */
+export async function listAvailableMcp(): Promise<{
+  builtin: AvailableMcpItem[];
+  admin: AvailableMcpItem[];
+  upstream: AvailableMcpItem[];
+}> {
+  const data = await agentFetch<Partial<{
+    builtin: AvailableMcpItem[];
+    admin: AvailableMcpItem[];
+    upstream: AvailableMcpItem[];
+  }>>('/available-mcp');
+  return {
+    builtin: data?.builtin ?? [],
+    admin: data?.admin ?? [],
+    upstream: data?.upstream ?? [],
+  };
+}
+
 // ==================== 流式发送 ====================
 
 /** agent_runner_loop 通过 SSE 吐出的事件（见 agent/agent_loop.py 的 on_event）。 */
@@ -741,8 +770,8 @@ export interface SendMessageHandle {
  * 唯一差别：Web 把 Response 交回上层自行读流；移动端在这里读完并逐帧回调，
  * 因为上层 hook 不想关心 ReadableStream。
  *
- * 注意这里仍用全局 fetch（不是 expo/fetch）—— 与 Web 同一个 fetch，行为一致，
- * 避免 cookie jar 不共享导致的 401。
+ * 用 fetchStream（expo/fetch）而非全局 fetch —— RN 的全局 fetch 是 XHR polyfill，
+ * 没有 ``res.body``，读流会直接抛「当前环境不支持流式响应」。详见 client.fetchStream。
  */
 export type AgentExecutionMode = 'interact' | 'plan' | 'goal';
 
@@ -794,7 +823,7 @@ function readAgentEventStream(
   const done = (async () => {
     let res: Response;
     try {
-      res = await fetch(url, {
+      res = await fetchStream(url, {
         method: 'POST',
         credentials: 'include',
         headers: { ...authHeaders(), 'Content-Type': 'application/json' },
@@ -807,14 +836,8 @@ function readAgentEventStream(
     }
 
     if (!res.status || !res.ok) {
-      let detail = `HTTP ${res.status}`;
-      try {
-        const data = (await res.json()) as { detail?: string; message?: string };
-        detail = data?.detail || data?.message || detail;
-      } catch {
-        /* ignore */
-      }
-      throw new ApiError(detail, undefined, res.status);
+      const data = await res.json().catch(() => null);
+      throw new ApiError(errorMessageFromBody(data, res.status), undefined, res.status);
     }
 
     const stream = res.body;
@@ -922,7 +945,7 @@ export function chatSendStream(
   const done = (async () => {
     let res: Response;
     try {
-      res = await fetch(`${getBaseUrl()}/agent/chat/send`, {
+      res = await fetchStream(`${getBaseUrl()}/agent/chat/send`, {
         method: 'POST',
         credentials: 'include',
         headers: { ...authHeaders(), 'Content-Type': 'application/json' },
@@ -1054,14 +1077,8 @@ export async function uploadChatConversationAttachment(
     body,
   });
   if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
-    try {
-      const data = (await res.json()) as { detail?: string };
-      detail = data?.detail || detail;
-    } catch {
-      /* keep */
-    }
-    throw new ApiError(`附件上传失败：${detail}`, undefined, res.status);
+    const data = await res.json().catch(() => null);
+    throw new ApiError(`附件上传失败：${errorMessageFromBody(data, res.status)}`, undefined, res.status);
   }
   return (await res.json()) as ConversationAttachment;
 }

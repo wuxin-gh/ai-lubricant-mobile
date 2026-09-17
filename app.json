@@ -2,7 +2,7 @@
   "expo": {
     "name": "Ai Lubricant",
     "slug": "ai-lubricant",
-    "version": "260909",
+    "version": "260916",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "scheme": "ailubricant",
@@ -28,7 +28,7 @@
     },
     "android": {
       "package": "com.ailubricant.mobile",
-      "versionCode": 260909,
+      "versionCode": 260916,
       "permissions": [
         "RECORD_AUDIO",
         "REQUEST_INSTALL_PACKAGES",

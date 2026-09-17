@@ -67,6 +67,10 @@ export interface Project {
   full_name?: string;
   repo_url?: string;
   platform?: string;
+  /** 绑定的 Git 身份 id；创建任务时透传为 git_identity_id，分支列表也靠它查。 */
+  git_identity_id?: string;
+  /** 项目默认分支（服务端 _project_dict 返回）。 */
+  branch?: string;
   auto_review_enabled?: boolean;
   created_at?: number;
   updated_at?: number;
@@ -385,7 +389,8 @@ export interface ListIssuesResp {
 /** Issue 分配请求体（对齐后端 canonical Task runtime 字段）。 */
 export interface AssignIssueReq {
   cli_name: 'claude' | 'codex' | 'opencode' | 'cursor';
-  model_id: string;
+  /** 不传 = 不下发，任务用 CLI 默认模型（与创建任务向导「空=不限制」一致）。 */
+  model_id?: string;
   node_id: string;
   parent_api_key_id: number;
   content?: string;

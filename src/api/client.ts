@@ -93,6 +93,40 @@ export function setUnauthorizedHandler(fn: (() => void) | null) {
   onUnauthorized = fn;
 }
 
+/**
+ * 可流式读取的 fetch（SSE 专用）。
+ *
+ * RN 的全局 ``fetch`` 是 whatwg-fetch 的 XHR polyfill：它把整个响应读完才 resolve，
+ * ``Response`` 上**没有** ``body``（原型只有 text/json/blob/arrayBuffer），所以
+ * ``res.body.getReader()`` 恒为 undefined —— SSE 一律走不通。Expo 自带的
+ * ``expo/fetch`` 基于原生 ``ReadableStream``，是 RN 上唯一能增量读流的实现。
+ *
+ * 因此流式接口必须用它；普通 JSON 请求继续用全局 fetch（行为一致、测试可 mock）。
+ * 取不到时（Expo Go / 测试环境 / 未打入原生模块）回退全局 fetch，让调用方原有的
+ * 「当前环境不支持流式响应」分支照常给出可读错误，而不是静默失败。
+ *
+ * 鉴权：expo/fetch 在 Android 复用 RN 的 OkHttpClient（含 CookieJar），iOS 用
+ * ``HTTPCookieStorage.shared`` —— ``credentials:'include'`` 下与全局 fetch 共用
+ * 同一份会话 Cookie，无需手工搬运。
+ */
+let streamingFetch: typeof fetch | null = null;
+try {
+  // 守卫式 require：Expo Go / 未打包原生模块时抛错，落到全局 fetch 兜底。
+  const mod = require('expo/fetch');
+  if (typeof mod?.fetch === 'function') streamingFetch = mod.fetch;
+} catch {
+  streamingFetch = null;
+}
+
+/** 当前是否有真正的流式 fetch（false=只有 XHR polyfill，SSE 不可用）。 */
+export const HAS_STREAMING_FETCH = !!streamingFetch;
+
+/** SSE 等需要增量读取的请求用这个，不要直接用全局 fetch。 */
+export function fetchStream(input: string, init?: RequestInit): Promise<Response> {
+  const impl = (streamingFetch ?? fetch) as (i: string, o?: RequestInit) => Promise<Response>;
+  return impl(input, init);
+}
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -102,6 +136,41 @@ export class ApiError extends Error {
     super(message);
     this.name = 'ApiError';
   }
+}
+
+/**
+ * 从错误响应体里取出可展示文案。
+ *
+ * 后端 FastAPI 的全局 HTTPException handler 把**所有** HTTPException 包成 OpenAI
+ * 风格信封 ``{error:{message,type,code}}``（见主仓 main.py 的
+ * ``openai_http_exception_handler``），而 ``detail`` / ``message`` 只在少数未走该
+ * handler 的路径上出现（如路由未匹配的 404）。只读 ``detail``/``message`` 会让
+ * 「该节点已被占用，请选择其它空闲节点」这类真实原因退化成「请求失败（409）」，
+ * 所以三种形状都要读。
+ *
+ * ``error.code`` 恒为 null、``error.type`` 由状态码推导（与语义无关），故都不消费。
+ * 提取不到任何文案时才回退到状态码。
+ */
+export function errorMessageFromBody(json: unknown, status: number): string {
+  if (json && typeof json === 'object') {
+    const body = json as { error?: unknown; detail?: unknown; message?: unknown };
+    const error = body.error;
+    const nested =
+      error && typeof error === 'object' ? (error as { message?: unknown }).message : undefined;
+    for (const candidate of [nested, body.detail, body.message]) {
+      if (typeof candidate === 'string' && candidate.trim()) return candidate;
+      // detail 可能是结构化对象（如 422 的校验错误），退化为 JSON 文本。
+      if (candidate && typeof candidate === 'object') {
+        try {
+          return JSON.stringify(candidate);
+        } catch {
+          /* 循环引用等：继续看下一个候选 */
+        }
+      }
+    }
+  }
+  if (typeof json === 'string' && json.trim()) return json;
+  return `请求失败（${status}）`;
 }
 
 type Query = Record<string, string | number | boolean | undefined | null>;
@@ -168,8 +237,7 @@ export async function request<T = unknown>(
     throw new ApiError((json as any).message || '请求失败', (json as any).code, res.status);
   }
   if (!res.ok) {
-    const detail = (json as any)?.detail || (json as any)?.message;
-    throw new ApiError(typeof detail === 'string' && detail ? detail : `请求失败（${res.status}）`, undefined, res.status);
+    throw new ApiError(errorMessageFromBody(json, res.status), undefined, res.status);
   }
   const data = normalizeData(method, path, json);
   return { code: 0, message: '', data } as ApiEnvelope<T>;

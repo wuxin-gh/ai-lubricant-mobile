@@ -1,4 +1,4 @@
-import { ApiError, authHeaders, getBaseUrl, openWebSocket, request } from './client';
+import { ApiError, authHeaders, errorMessageFromBody, fetchStream, getBaseUrl, openWebSocket, request } from './client';
 import { IncrementalSseParser } from './sse';
 
 export type TaskProvider = 'claude' | 'codex' | 'opencode' | 'cursor';
@@ -65,7 +65,23 @@ export interface UserTaskDetail extends UserTaskSummary {
   skill_config?: Record<string, unknown>[];
   plugin_config?: Record<string, unknown>[];
   mcp_overlay?: Record<string, unknown>[];
+  /** 创建时勾选的新资源装进环境/节点本机的失败清单（best-effort，不阻断创建）。 */
+  env_install_warnings?: string[];
 }
+
+/**
+ * 资源引用绑定。裸 id 字符串 = 旧表引用；``{reference_id, entries}`` = 统一资源池
+ * 引用（按 entries 过滤子技能，缺省=整个集合）；``{resource_id, entries}`` 同理走
+ * 旧表。服务端 resolve_reference_specs 按这些键分流。
+ */
+export type TaskResourceBinding =
+  | string
+  | { resource_id?: string; reference_id?: string; entries?: string[] };
+
+/** MCP 绑定：团队引用 {resource_id}，或内置服务/实例 {service_id, param_key?, param_values?}。 */
+export type TaskMcpBinding =
+  | { resource_id: string }
+  | { service_id: number; param_key?: string; param_values?: string[] };
 
 export interface CreateUserTaskPayload {
   content: string;
@@ -75,17 +91,42 @@ export interface CreateUserTaskPayload {
   model_id?: string;
   models?: string[];
   git_identity_id?: string;
-  repo?: { repo_url?: string; branch?: string; commit?: string };
-  extra?: { project_id?: string; issue_id?: string; skill_ids?: string[]; plugin_ids?: string[] };
+  // 分支策略对齐编辑器：default=跟随仓库默认分支；existing=checkout 已有分支
+  // （branch 必填）；auto=首次初始化时从默认分支确定性创建 task/<task_id>。
+  // commit 与凭据字段在公开路由不可达（pydantic 先丢弃），故不声明。
+  repo?: { repo_url?: string; branch?: string; branch_mode?: 'default' | 'existing' | 'auto' };
+  extra?: {
+    project_id?: string;
+    issue_id?: string;
+    skill_ids?: TaskResourceBinding[];
+    plugin_ids?: TaskResourceBinding[];
+  };
   mode?: string;
+  // 执行环境档位：isolated（默认/缺省，一次性 home）/ shared（节点上命名的持久
+  // 环境，需 env_id）/ system（节点操作者真实 home，需节点已开启该模式）。
+  env_mode?: 'isolated' | 'shared' | 'system';
+  env_id?: string;
+  env_name?: string;
+  // 环境自带资源的激活子集（环境清单里的名字）：只激活列出的技能/插件，其余
+  // 环境已装项本次任务不启用。**空/缺省 = 全激活**（空列表不可表达）。
+  active_skills?: string[];
+  active_plugins?: string[];
   parent_api_key_id?: number;
   usage_limit?: Record<string, number>;
   expires_at?: number;
   expected_client_id?: string;
   bootstrap_content?: string;
   skill_config?: Record<string, unknown>[];
-  mcp_config?: Record<string, unknown>[];
+  mcp_config?: TaskMcpBinding[];
   plugin_config?: Record<string, unknown>[];
+  // 子 Key 收窄参数（复用既有 api_keys 列）。省略=继承父级。注意：可用模型的
+  // 真相源是 ``models``（服务端同源写 models_snapshot 与子 Key model_whitelist），
+  // 服务端虽声明了 model_whitelist 但不消费，故这里不暴露。
+  rate_limit?: Record<string, number>;
+  editor_provider_whitelist?: string[];
+  selection_strategy?: string;
+  /** 项目提示词 id：服务端取 content 前置拼进任务正文，自身不落库。 */
+  prompt_id?: string;
   task_type?: string;
   sub_type?: string;
   task_role?: string;
@@ -364,6 +405,20 @@ export async function listUserTaskTerminals(taskId: string): Promise<UserTaskTer
   return response.data?.terminals ?? [];
 }
 
+/**
+ * 某 Git 身份有权访问的仓库分支名列表（创建任务「指定已有分支」用）。
+ *
+ * 路径里的 repo_full_name 含 ``/``，服务端按 ``{escaped_repo_full_name:path}``
+ * 收，且只 unquote 一次 —— 所以这里 encode 恰好一次，不要二次编码。
+ */
+export async function listRepoBranches(gitIdentityId: string, repoFullName: string): Promise<string[]> {
+  const response = await request<{ name?: string }[]>(
+    `/api/v1/users/git-identities/${encodeURIComponent(gitIdentityId)}/${encodeURIComponent(repoFullName)}/branches`,
+  );
+  const rows = Array.isArray(response.data) ? response.data : [];
+  return rows.map((item) => String(item?.name || '')).filter(Boolean);
+}
+
 export async function deleteUserTaskTerminal(taskId: string, terminalId: string) {
   return (await request(`${taskPath(taskId)}/terminals/${encodeURIComponent(terminalId)}`, { method: 'DELETE' })).data;
 }
@@ -418,7 +473,7 @@ export function streamTaskEvents(
   const done = (async () => {
     let response: Response;
     try {
-      response = await fetch(`${getBaseUrl()}${taskPath(taskId)}/events`, {
+      response = await fetchStream(`${getBaseUrl()}${taskPath(taskId)}/events`, {
         credentials: 'include',
         headers: authHeaders(),
         signal: controller.signal,
@@ -428,14 +483,10 @@ export function streamTaskEvents(
       throw new ApiError((error as Error)?.message || '任务事件连接失败');
     }
     if (!response.ok) {
-      let detail = `HTTP ${response.status}`;
-      try {
-        const body = await response.json() as { detail?: string };
-        detail = body.detail || detail;
-      } catch {
-        // Keep the HTTP fallback.
-      }
-      throw new ApiError(detail, undefined, response.status);
+      // 与 client.request 同源：HTTPException 被全局 handler 包成 {error:{message}}，
+      // 只读 detail 会把真实原因退化成 HTTP 状态码。
+      const body = await response.json().catch(() => null);
+      throw new ApiError(errorMessageFromBody(body, response.status), undefined, response.status);
     }
     if (!response.body) throw new ApiError('当前环境不支持流式响应');
 

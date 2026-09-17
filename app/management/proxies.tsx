@@ -9,6 +9,7 @@ import { addAdminProxy, deleteAdminProxy, editAdminProxy, getAdminProxies, type 
 import { AdminScreen, AdminSheet, LabeledInput, SectionCard } from '@/components/admin-ui';
 import { Icons } from '@/components/Icons';
 import { useTheme } from '@/theme';
+import { parseProxyUrl } from '@/utils/proxyUrl';
 
 const MODE_LABEL: Record<string, string> = { network: '网络代理', url_prefix: '前缀转发', direct: '强制直连', node: '节点转发' };
 type EditableMode = 'network' | 'url_prefix' | 'direct';
@@ -28,6 +29,15 @@ export default function ProxiesScreen() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [saving, setSaving] = useState(false);
+
+  // 地址框里粘的凭据（若有）。仅 network 模式参与，url_prefix 的基址不走认证。
+  const parsedUrl = React.useMemo(
+    () => (mode === 'network' ? parseProxyUrl(url) : { url, username: '', password: '', hasCredentials: false }),
+    [mode, url],
+  );
+  // 地址里没凭据时回退到 state（编辑既有条目、地址框是裸地址的场景）。
+  const hintUsername = parsedUrl.hasCredentials ? parsedUrl.username : username;
+  const hintPassword = parsedUrl.hasCredentials ? parsedUrl.password : password;
 
   const load = useCallback(async () => {
     setLoading(true); setError('');
@@ -51,7 +61,19 @@ export default function ProxiesScreen() {
     if (!name.trim() || (mode !== 'direct' && !url.trim()) || saving) return;
     setSaving(true);
     try {
-      const input = { name: name.trim(), mode, url: url.trim(), username: username.trim(), password };
+      // 网络代理只留一个地址框，凭据可能就粘在里面（scheme://user:pass@host:port）：
+      // 拆出来提交，后端存的仍是 地址/用户名/密码 三个字段，运行时再拼回去。
+      // 地址里没凭据时回退到 state——编辑既有条目、用户没碰地址框的场景靠这条保住原凭据。
+      // 仅 network 模式拆：url_prefix 的基址不走认证，其 path 里若有 @ 不应被当凭据摘掉。
+      const parsed = mode === 'network' ? parseProxyUrl(url) : null;
+      const useParsed = !!parsed?.hasCredentials;
+      const input = {
+        name: name.trim(),
+        mode,
+        url: parsed ? parsed.url : url.trim(),
+        username: useParsed ? parsed!.username : username.trim(),
+        password: useParsed ? parsed!.password : password,
+      };
       if (editTarget) await editAdminProxy(editTarget.id, input);
       else await addAdminProxy(input);
       setOpen(false);
@@ -103,11 +125,20 @@ export default function ProxiesScreen() {
           </View>
         </View>
         <LabeledInput label="名称" value={name} onChangeText={setName} placeholder="代理名称" />
-        {mode !== 'direct' ? <LabeledInput label="URL" value={url} onChangeText={setUrl} placeholder={mode === 'network' ? 'http://host:port' : 'https://prefix.example.com'} keyboardType="url" /> : null}
-        {mode !== 'direct' ? <>
-          <LabeledInput label="用户名（可选）" value={username} onChangeText={setUsername} placeholder="留空表示无认证" />
-          <LabeledInput label="密码（可选）" value={password} onChangeText={setPassword} placeholder="留空表示无认证" secureTextEntry />
-        </> : null}
+        {mode !== 'direct' ? <LabeledInput label={mode === 'network' ? '代理地址' : 'URL'} value={url} onChangeText={setUrl} placeholder={mode === 'network' ? 'http://用户名:密码@host:port' : 'https://prefix.example.com'} keyboardType="url" /> : null}
+        {/* 凭据直接粘在地址里即可：当场回显拆到了什么，避免用户以为没生效。
+            地址是裸地址时回退显示 state 里的凭据——编辑既有条目靠这条才看得出认证还在。 */}
+        {mode === 'network' && (hintUsername || hintPassword) ? (
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 6 }}>
+            <Text style={{ color: t.acTx, fontSize: 11.5 }}>已识别认证：</Text>
+            {hintUsername ? <Text style={{ color: t.tx2, fontSize: 11.5 }}>用户名 {hintUsername}</Text> : null}
+            {hintPassword ? <Text style={{ color: t.tx2, fontSize: 11.5 }}>密码已设置</Text> : null}
+            <Pressable onPress={() => { setUrl(parsedUrl.url); setUsername(''); setPassword(''); }} hitSlop={8}>
+              <Text style={{ color: t.acTx, fontSize: 11.5, fontWeight: '700' }}>清除</Text>
+            </Pressable>
+          </View>
+        ) : null}
+        {mode === 'network' ? <Text style={{ color: t.tx3, fontSize: 11.5, lineHeight: 17 }}>认证信息直接写在代理地址里即可（如 http://用户名:密码@host:port），系统会自动拆分保存，运行时再拼回代理 URL。</Text> : null}
         {editTarget ? <Text style={{ color: t.amber, fontSize: 11.5 }}>编辑会以表单中的值覆盖原配置；未填的认证字段会清空，请按需填写。</Text> : null}
       </AdminSheet>
     </>

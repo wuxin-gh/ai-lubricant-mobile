@@ -1,4 +1,14 @@
-import { nodeAvailability, nodeHealthOf, nodeModeOptions, type Node } from '../nodeHealth';
+import {
+  isNodeUsableForTask,
+  nodeAvailability,
+  nodeHasCapacity,
+  nodeHealthOf,
+  nodeModeOptions,
+  nodeSystemEnvAllowed,
+  nodeUnusableReason,
+  providerInstalled,
+  type Node,
+} from '../nodeHealth';
 
 function node(overrides: Partial<Node> = {}): Node {
   return {
@@ -103,5 +113,89 @@ describe('nodeModeOptions', () => {
   it('matches the provider case-insensitively', () => {
     const n = node({ capabilities: { editors: [{ provider: 'Codex', modes: [{ id: 'read-only' }] }] } });
     expect(nodeModeOptions(n, 'codex')).not.toBeNull();
+  });
+});
+
+describe('providerInstalled', () => {
+  it('passes when no provider is asked for', () => {
+    expect(providerInstalled(node({ capabilities: {} }), undefined)).toBe(true);
+  });
+
+  it('matches capabilities.editors[].provider case-insensitively', () => {
+    const n = node({ capabilities: { editors: [{ provider: 'Codex' }] } });
+    expect(providerInstalled(n, 'codex')).toBe(true);
+    expect(providerInstalled(n, 'claude')).toBe(false);
+  });
+
+  it('falls back to the comma-separated providers string', () => {
+    const n = node({ capabilities: { providers: 'claude, opencode' } });
+    expect(providerInstalled(n, 'opencode')).toBe(true);
+    expect(providerInstalled(n, 'codex')).toBe(false);
+  });
+
+  it('falls back to editor_version_<provider>', () => {
+    const n = node({ capabilities: { editor_version_claude: '1.2.3' } });
+    expect(providerInstalled(n, 'claude')).toBe(true);
+    expect(providerInstalled(n, 'codex')).toBe(false);
+  });
+
+  it('does not filter when the node reports no ownership info at all', () => {
+    // 老节点上报不了归属：宁可让用户选，也不要让列表整段消失。
+    expect(providerInstalled(node({ capabilities: {} }), 'codex')).toBe(true);
+  });
+});
+
+describe('nodeSystemEnvAllowed', () => {
+  it('requires the capability bit to be the string "true"', () => {
+    expect(nodeSystemEnvAllowed(node({ capabilities: { system_env: 'true' } }))).toBe(true);
+    expect(nodeSystemEnvAllowed(node({ capabilities: { system_env: 'false' } }))).toBe(false);
+    expect(nodeSystemEnvAllowed(node({ capabilities: {} }))).toBe(false);
+    expect(nodeSystemEnvAllowed(null)).toBe(false);
+  });
+});
+
+describe('nodeHasCapacity', () => {
+  it('is unlimited when max_sessions is absent or zero', () => {
+    expect(nodeHasCapacity(node({ active_sessions: 99 }))).toBe(true);
+    expect(nodeHasCapacity(node({ capacity: { max_sessions: 0 }, active_sessions: 99 }))).toBe(true);
+  });
+
+  it('compares occupancy against the configured limit', () => {
+    expect(nodeHasCapacity(node({ capacity: { max_sessions: 3 }, active_sessions: 2 }))).toBe(true);
+    expect(nodeHasCapacity(node({ capacity: { max_sessions: 3 }, active_sessions: 3 }))).toBe(false);
+  });
+});
+
+describe('nodeUnusableReason', () => {
+  it('returns empty for an online node with room', () => {
+    expect(nodeUnusableReason(node())).toBe('');
+    expect(isNodeUsableForTask(node())).toBe(true);
+  });
+
+  it('reports liveness before capacity', () => {
+    const offline = node({ online: false, connected: false, last_heartbeat_at: 'x', active_sessions: 9, capacity: { max_sessions: 1 } });
+    expect(nodeUnusableReason(offline)).toBe('节点离线');
+  });
+
+  it('reports capacity before the system-env requirement', () => {
+    const full = node({ capacity: { max_sessions: 1 }, active_sessions: 1, capabilities: {} });
+    expect(nodeUnusableReason(full, 'claude', true)).toBe('容量已满');
+  });
+
+  it('reports the missing system env before a missing editor', () => {
+    const n = node({ capabilities: { editors: [] } });
+    expect(nodeUnusableReason(n, 'codex', true)).toBe('未开启系统环境');
+  });
+
+  it('reports the editor that is not installed', () => {
+    const n = node({ capabilities: { editors: [{ provider: 'claude' }] } });
+    expect(nodeUnusableReason(n, 'codex')).toBe('未安装 Codex');
+    expect(nodeUnusableReason(n, 'opencode')).toBe('未安装 OpenCode');
+    expect(nodeUnusableReason(n, 'claude')).toBe('');
+  });
+
+  it('marks non-execution nodes unusable', () => {
+    expect(nodeUnusableReason(node({ node_role: 'management' }))).toBe('非执行节点');
+    expect(isNodeUsableForTask(node({ node_role: 'management' }))).toBe(false);
   });
 });

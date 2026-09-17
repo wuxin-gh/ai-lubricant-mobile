@@ -8,6 +8,9 @@ jest.mock('../client', () => ({
   },
   authHeaders: () => ({ Authorization: 'Basic test' }),
   getBaseUrl: () => 'https://example.test',
+  // 流式接口走 client.fetchStream（真机上是 expo/fetch，XHR polyfill 读不了流）。
+  // 测试里转回 global.fetch，让各用例继续用 fetch mock 喂 SSE 分片。
+  fetchStream: (input: string, init?: RequestInit) => fetch(input, init),
   openWebSocket: jest.fn(),
   request: jest.fn(),
 }));

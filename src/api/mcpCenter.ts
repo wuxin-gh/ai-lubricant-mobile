@@ -23,14 +23,15 @@ export interface McpAuthorizationParamKind { key: string; label: string; resourc
 
 async function principalFetch<T>(path: string, init?: RequestInit): Promise<T> {
   // principals 返回裸 JSON（非信封），与 web principalFetch 同构；不走 client.request。
-  const { getBaseUrl, authHeaders, ApiError } = await import('@/api/client');
+  const { getBaseUrl, authHeaders, ApiError, errorMessageFromBody } = await import('@/api/client');
   const res = await fetch(`${getBaseUrl()}/api/v1/users/mcp-principals${path}`, {
     ...init, credentials: 'include',
     headers: { 'Content-Type': 'application/json', ...authHeaders(), ...(init?.headers || {}) },
   });
   if (!res.ok) {
-    let detail = `HTTP ${res.status}`; try { const d = await res.json(); detail = d?.detail || d?.message || detail; } catch { /* keep */ }
-    throw new ApiError(detail, undefined, res.status);
+    // HTTPException 被全局 handler 包成 {error:{message}}，必须走统一提取。
+    const body = await res.json().catch(() => null);
+    throw new ApiError(errorMessageFromBody(body, res.status), undefined, res.status);
   }
   const text = await res.text(); return (text ? JSON.parse(text) : {}) as T;
 }
@@ -62,6 +63,37 @@ export async function createReferenceFromGithub(repo: string, ref: string, kind:
 }
 export async function deleteResourceReference(resourceId: string): Promise<void> { await request(`${REF}/references/${encodeURIComponent(resourceId)}`, { method: 'DELETE' }); }
 
+/**
+ * 当前用户**有权使用**的团队引用（旧表 ``mc_resource_references``）。
+ *
+ * 与 {@link listResourceReferences} 的区别是关键：后者列团队引用全集（含未授权给
+ * 本用户分组的），只适合管理/展示；创建任务时必须用本函数 —— 服务端 resolve 按
+ * 授权收窄，选了未授权的资源会在创建时 403「资源未授权或配置无效」。
+ */
+export async function listEffectiveResources(resourceType: ResourceType): Promise<ResourceReference[]> {
+  const r = await request<ResourceReference[]>(`${REF}/effective/${encodeURIComponent(resourceType)}`);
+  return Array.isArray(r.data) ? r.data : [];
+}
+
+/** 统一资源池引用行（新表 resources + resource_references，按分组授权可见）。 */
+export interface ResourceReferenceV2 {
+  id: string; team_id: string; resource_id: number; display_name: string;
+  description: string; version: string; enabled: boolean;
+  resource: {
+    id: number;
+    resource_type: 'skills' | 'skill' | 'plugin' | 'mcp' | 'prompt';
+    resource_data: { entries?: { name?: string; path?: string; description?: string; editors?: string[] }[]; [k: string]: unknown };
+    editors: string[]; name: string; display_name: string; description: string; version: string; status: string;
+  };
+}
+
+/** 列团队引用（新表）。resourceType 兼容旧枚举：skill → skill+skills 集合并集。 */
+export async function listReferencesV2(resourceType?: string): Promise<ResourceReferenceV2[]> {
+  const q = resourceType ? `?resource_type=${encodeURIComponent(resourceType)}` : '';
+  const r = await request<ResourceReferenceV2[]>(`${REF}/v2/references${q}`);
+  return Array.isArray(r.data) ? r.data : [];
+}
+
 // ── 项目提示词（/api/v1/users/project-prompts，与 web editorClient 同端点）─
 export interface ProjectPrompt { id: string; name: string; content: string; providers: string[]; enabled: boolean; scope?: 'system' | 'mine' }
 export async function listProjectPrompts(): Promise<ProjectPrompt[]> { const r = await request<ProjectPrompt[]>('/api/v1/users/project-prompts'); return Array.isArray(r.data) ? r.data : []; }
@@ -74,9 +106,12 @@ export type MarketModule = 'mcp' | 'skills' | 'plugins' | 'prompts';
 export interface MarketItem { id: string; module?: string; kind?: string; name?: string; display_name?: string; summary?: string; publisher?: string; category?: string; tags?: string[]; latest_version?: string; status?: string }
 export interface MarketManifest { id: string; kind?: string; name?: string; display_name?: string; summary?: string; description?: string; publisher?: string; category?: string; tags?: string[]; version?: string; source_url?: string; download_url?: string; digest?: string; [k: string]: unknown }
 async function marketFetch<T>(path: string): Promise<T> {
-  const { getBaseUrl, authHeaders, ApiError } = await import('@/api/client');
+  const { getBaseUrl, authHeaders, ApiError, errorMessageFromBody } = await import('@/api/client');
   const res = await fetch(`${getBaseUrl()}${path}`, { credentials: 'include', headers: { ...authHeaders() } });
-  if (!res.ok) throw new ApiError(`HTTP ${res.status}`, undefined, res.status);
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new ApiError(errorMessageFromBody(body, res.status), undefined, res.status);
+  }
   const text = await res.text(); return (text ? JSON.parse(text) : {}) as T;
 }
 export async function fetchMarketIndex(module: MarketModule): Promise<MarketItem[]> {

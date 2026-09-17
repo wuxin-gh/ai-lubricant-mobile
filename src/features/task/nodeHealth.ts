@@ -115,3 +115,84 @@ export function nodeModeOptions(node: Node | null | undefined, provider?: string
     ...match.modes.map((mode) => ({ value: String(mode.id || ''), label: mode.label || String(mode.id || '') })),
   ];
 }
+
+/** 该节点是否开启了系统内置环境（env_mode=system 需要节点上报此能力位）。 */
+export function nodeSystemEnvAllowed(node: Node | null | undefined): boolean {
+  const caps = node?.capabilities as { system_env?: unknown } | undefined;
+  return String(caps?.system_env ?? '') === 'true';
+}
+
+/**
+ * 该编辑器（provider）是否已在节点上装好。未传 provider 时不做此过滤。
+ *
+ * 与 Web ``nodeEditorVersions`` 同口径，三种信号任一在场即视为「节点能上报归属」，
+ * 此时严格按归属判定（不在列表里 = 未装）：
+ *  1. ``capabilities.editors[].provider``（节点注册探测的结构化上报，权威来源）
+ *  2. ``capabilities.providers``（逗号分隔串，老节点）
+ *  3. ``capabilities.editor_version_<provider>``
+ * 三种信号**全都缺失**才回落到「不拦」—— 老节点上报不了归属，宁可让用户选、由
+ * 服务端在派发时拒绝，也不要让可选列表整段消失。
+ */
+export function providerInstalled(node: Node | null | undefined, provider?: string | null): boolean {
+  const wanted = (provider || '').toLowerCase();
+  if (!wanted) return true;
+  const caps = (node?.capabilities || {}) as Record<string, unknown>;
+
+  const editors = caps.editors;
+  const hasEditors = Array.isArray(editors) && editors.length > 0;
+  const providersStr = String(caps.providers || '').trim();
+  const hasAnyVersion = Object.keys(caps).some(
+    (key) => key.startsWith('editor_version_') && String(caps[key] || '').trim(),
+  );
+
+  // 节点完全没有归属信息：不拦（老节点兼容）。
+  if (!hasEditors && !providersStr && !hasAnyVersion) return true;
+
+  if (hasEditors && (editors as NodeEditorCap[]).some(
+    (entry) => (entry?.provider || '').toLowerCase() === wanted,
+  )) return true;
+  if (providersStr && providersStr.split(',').some((item) => item.trim().toLowerCase() === wanted)) return true;
+  if (String(caps[`editor_version_${wanted}`] || '').trim()) return true;
+  return false;
+}
+
+/**
+ * 节点是否还有容量跑新任务。容量未配置（max_sessions 缺省/0）= 不限。
+ * 与 Web ``isNodeUsable`` 同口径：只有配了上限才按占用判定。
+ */
+export function nodeHasCapacity(node: Node): boolean {
+  const maxSessions = node.capacity?.max_sessions || 0;
+  if (maxSessions <= 0) return true;
+  return (node.active_sessions || 0) < maxSessions;
+}
+
+/**
+ * 执行节点为什么不可作为任务目标。返回空串表示可选。
+ *
+ * 顺序与 Web ``unusableReason`` 一致：审批/心跳 → 容量 → 系统环境要求 →
+ * 该客户端是否已装。前面的原因优先，所以离线节点不会显示成「未安装 Codex」。
+ */
+export function nodeUnusableReason(
+  node: Node,
+  provider?: string | null,
+  requireSystemEnv = false,
+): string {
+  const availability = nodeAvailability(node);
+  if (!availability.usable) return availability.reason;
+  if (!nodeHasCapacity(node)) return '容量已满';
+  if (requireSystemEnv && !nodeSystemEnvAllowed(node)) return '未开启系统环境';
+  if (!providerInstalled(node, provider)) {
+    const label = provider === 'codex' ? 'Codex' : provider === 'opencode' ? 'OpenCode' : 'Claude';
+    return `未安装 ${label}`;
+  }
+  return '';
+}
+
+/** 该节点能否作为任务目标（`nodeUnusableReason` 为空即可以）。 */
+export function isNodeUsableForTask(
+  node: Node,
+  provider?: string | null,
+  requireSystemEnv = false,
+): boolean {
+  return nodeUnusableReason(node, provider, requireSystemEnv) === '';
+}

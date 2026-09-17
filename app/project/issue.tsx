@@ -12,6 +12,7 @@ import { listRuntimeModelOptions } from '@/api/agent';
 import { listParentKeys, type ParentKeyItem, type TaskProvider } from '@/api/task';
 import type { IssueStatus, Model, Node, ProjectIssue, ProjectIssueComment, TeamUser } from '@/api/types';
 import { LabeledInput, SearchableSelect, Segmented } from '@/components/admin-ui';
+import { isNodeUsableForTask } from '@/features/task/nodeHealth';
 import { Card, Chip, EmptyView, GlassNav, LoadingView, PrimaryButton, Scrim, StatusBadge } from '@/components/ui';
 import { MarkdownView } from '@/components/MarkdownView';
 import { ModelSheet } from '@/components/sheets';
@@ -185,7 +186,9 @@ export default function IssueDetailScreen() {
     (async () => {
       try {
         const [nds, keys] = await Promise.all([listNodes(), listParentKeys()]);
-        const usableNodes = nds.filter((node) => node.connected && !node.is_passive && node.node_role !== 'management' && node.node_role !== 'passive_management' && (node.active_sessions ?? 0) === 0);
+        // 节点可用性按心跳+容量+客户端是否已装判定（与创建任务向导同源），不再要求
+        // active_sessions===0；把不可用节点也保留下来让用户看到原因（由选择器标注）。
+        const usableNodes = nds.filter((node) => isNodeUsableForTask(node, provider));
         const usableKeys = keys.filter((key) => !key.disabled);
         setNodes(usableNodes);
         setParentKeys(usableKeys);
@@ -195,7 +198,7 @@ export default function IssueDetailScreen() {
         /* 容错：预取失败不阻塞弹窗，用户可看到空列表 */
       }
     })();
-  }, [assignOpen, nodeId, modelId, parentKeyId]);
+  }, [assignOpen, nodeId, modelId, parentKeyId, provider]);
 
   useEffect(() => {
     if (!assignOpen || !parentKeyId) {
@@ -205,13 +208,13 @@ export default function IssueDetailScreen() {
     }
     let active = true;
     setModels([]);
+    // 不再默认选中第一个模型：服务端会把 models 同源写成子 Key 的 model_whitelist，
+    // 默认选第一个会静默收窄成单模型。空 = 不限制，与创建任务向导一致。
     setModelId('');
     void listRuntimeModelOptions(Number(parentKeyId))
       .then((options) => {
         if (!active) return;
-        const rows: Model[] = options.map((item) => ({ id: item.value, model: item.value, remark: item.label }));
-        setModels(rows);
-        setModelId(rows[0]?.id || '');
+        setModels(options.map((item) => ({ id: item.value, model: item.value, remark: item.label })));
       })
       .catch(() => { if (active) setModels([]); });
     return () => { active = false; };
@@ -234,7 +237,7 @@ export default function IssueDetailScreen() {
 
   const doAssign = useCallback(async () => {
     if (!projectId || !issueId) return;
-    if (!nodeId || !modelId || !parentKeyId) { Alert.alert('请选择执行节点、模型和父 API Key'); return; }
+    if (!nodeId || !parentKeyId) { Alert.alert('请选择执行节点和父 API Key'); return; }
     if (provider === 'codex') {
       Alert.alert('暂不支持', 'Issue 自动生成的首条内容当前无法在提交前稳定取得，暂不能使用 Codex 启动。');
       return;
@@ -243,9 +246,10 @@ export default function IssueDetailScreen() {
     try {
       const result = await assignIssue(projectId, issueId, {
         cli_name: provider,
-        model_id: modelId,
         node_id: nodeId,
         parent_api_key_id: Number(parentKeyId),
+        // 不选模型 = 不下发 model_id，任务用 CLI 默认模型（与创建任务向导「空=不限制」一致）。
+        ...(modelId ? { model_id: modelId } : {}),
         ...((maxRequests || maxTokens) ? {
           usage_limit: {
             ...(maxRequests ? { max_requests: Number(maxRequests) } : {}),
@@ -503,11 +507,11 @@ export default function IssueDetailScreen() {
           <ScrollView style={{ maxHeight: 500 }} contentContainerStyle={{ paddingHorizontal: 12, gap: 8 }} keyboardShouldPersistTaps="handled">
             <Segmented label="执行工具" value={provider} options={[{ value: 'opencode', label: 'OpenCode' }, { value: 'claude', label: 'Claude Code' }]} onChange={setProvider} hint="Codex Issue 任务需预先确定首条内容，当前入口暂不提供。" />
             <AssignRow icon="server" label="执行节点" value={selectedNode ? (selectedNode.node_name || selectedNode.node_id || '已选择') : (nodes.length ? '选择节点' : '无可用节点')} t={t} onPress={() => setPicking('node')} />
-            <AssignRow icon="cube" label="模型" value={selectedModel ? modelLabel(selectedModel) : '选择模型'} t={t} onPress={() => setPicking('model')} divider />
+            <AssignRow icon="cube" label="模型" value={selectedModel ? modelLabel(selectedModel) : '不限制（用默认）'} t={t} onPress={() => setPicking('model')} divider />
             <AssignRow icon="lock" label="父 API Key" value={selectedKey?.name || selectedKey?.key_masked || '选择可用父 Key'} t={t} onPress={() => setPicking('key')} divider />
             <View style={{ flexDirection: 'row', gap: 8 }}><View style={{ flex: 1 }}><LabeledInput label="最大请求数" value={maxRequests} onChangeText={setMaxRequests} keyboardType="numeric" placeholder="不限制" /></View><View style={{ flex: 1 }}><LabeledInput label="最大 Token" value={maxTokens} onChangeText={setMaxTokens} keyboardType="numeric" placeholder="不限制" /></View></View>
             <View style={{ height: 4 }} />
-            <Pressable onPress={doAssign} disabled={assigning || !nodeId || !modelId || !parentKeyId || provider === 'codex'} style={({ pressed }) => [{ height: 52, borderRadius: 16, backgroundColor: t.ac, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 8 }, (assigning || !nodeId || !modelId || !parentKeyId || provider === 'codex') && { opacity: 0.45 }, pressed && { transform: [{ scale: 0.98 }] }]}>
+            <Pressable onPress={doAssign} disabled={assigning || !nodeId || !parentKeyId || provider === 'codex'} style={({ pressed }) => [{ height: 52, borderRadius: 16, backgroundColor: t.ac, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 8 }, (assigning || !nodeId || !parentKeyId || provider === 'codex') && { opacity: 0.45 }, pressed && { transform: [{ scale: 0.98 }] }]}>
               {assigning ? <Spinner size={18} color={t.acInk} sw={2.4} /> : <Icons.arrowRight size={18} color={t.acInk} sw={2.4} />}
               <Text style={{ color: t.acInk, fontSize: 16, fontWeight: '800' }}>{assigning ? '启动中…' : '启动任务'}</Text>
             </Pressable>
